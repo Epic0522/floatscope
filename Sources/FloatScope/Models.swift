@@ -106,71 +106,68 @@ enum AgentHubConfigStore {
         return migrated
     }
 
-    static var defaultConfig: AgentHubConfig {
-        AgentHubConfig(
-            version: 1,
-            conversationRoot: FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Documents")
-                .appendingPathComponent("FloatScope Conversations")
-                .path,
-            agents: [
-                AgentRuntimeConfig(
-                    id: "agent1",
-                    kind: "codex-app-server",
-                    displayName: "Agent 1",
-                    color: "#FF6FB7",
-                    executablePath: "",
-                    model: CodexModelPreset.gpt54Mini.codexModel,
-                    effort: "medium",
-                    variant: nil,
-                    models: CodexModelPreset.allCases.map(\.codexModel),
-                    efforts: ReasoningEffortPreset.allCases.map(\.rawValue),
-                    variants: nil
-                ),
-                AgentRuntimeConfig(
-                    id: "agent2",
-                    kind: "opencode-run",
-                    displayName: "Agent 2",
-                    color: "#A85BFF",
-                    executablePath: "",
-                    model: OpenCodeModelPreset.deepSeekV4FlashFree.modelIdentifier,
-                    effort: nil,
-                    variant: "auto",
-                    models: OpenCodeModelPreset.allCases.map(\.modelIdentifier),
-                    efforts: nil,
-                    variants: OpenCodeVariantPreset.allCases.map(\.rawValue)
-                )
-            ]
-        )
-    }
+    static let defaultConfig = AgentHubConfig(
+        version: 1,
+        conversationRoot: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("FloatScope Conversations")
+            .path,
+        agents: [
+            AgentRuntimeConfig(
+                id: "agent1",
+                kind: "codex-app-server",
+                displayName: "agent1",
+                color: "#FF6FB7",
+                executablePath: "/opt/homebrew/bin/codex",
+                model: "gpt-5.5",
+                effort: "medium",
+                variant: nil,
+                models: CodexModelPreset.allCases.map(\.codexModel),
+                efforts: ReasoningEffortPreset.allCases.map(\.rawValue),
+                variants: nil
+            ),
+            AgentRuntimeConfig(
+                id: "agent2",
+                kind: "opencode-run",
+                displayName: "agent2",
+                color: "#A85BFF",
+                executablePath: "/opt/homebrew/bin/opencode",
+                model: OpenCodeModelPreset.deepSeekV4FlashFree.modelIdentifier,
+                effort: nil,
+                variant: "auto",
+                models: OpenCodeModelPreset.allCases.map(\.modelIdentifier),
+                efforts: nil,
+                variants: OpenCodeVariantPreset.allCases.map(\.rawValue)
+            )
+        ]
+    )
 }
 
 enum AgentID: String, CaseIterable, Identifiable {
-    case agent1
-    case agent2
+    case primary
+    case secondary
     case auto
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .agent1: "Agent 1"
-        case .agent2: "Agent 2"
+        case .primary: "Agent 1"
+        case .secondary: "Agent 2"
         case .auto: "Group"
         }
     }
 }
 
 enum ConcreteAgentID: String, CaseIterable, Identifiable {
-    case agent1
-    case agent2
+    case primary
+    case secondary
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .agent1: "Agent 1"
-        case .agent2: "Agent 2"
+        case .primary: "Agent 1"
+        case .secondary: "Agent 2"
         }
     }
 }
@@ -212,8 +209,8 @@ struct AgentVisualConfig {
     var systemColorHex: String
 
     var userColor: Color { Color(hex: userColorHex) }
-    var agent1Color: Color { Color(hex: agent1ColorHex) }
-    var agent2Color: Color { Color(hex: agent2ColorHex) }
+    var primaryColor: Color { Color(hex: agent1ColorHex) }
+    var secondaryColor: Color { Color(hex: agent2ColorHex) }
     var systemColor: Color { Color(hex: systemColorHex) }
 }
 
@@ -542,20 +539,290 @@ struct SettingsKeys {
     static let secondaryModelPreset = "FloatScope.secondaryModelPreset"
     static let codexEffortPreset = "FloatScope.codexEffortPreset"
     static let secondaryVariantPreset = "FloatScope.secondaryVariantPreset"
-    static let agent1DisplayName = "FloatScope.agent1DisplayName"
-    static let agent2DisplayName = "FloatScope.agent2DisplayName"
+    static let primaryDisplayName = "FloatScope.primaryDisplayName"
+    static let secondaryDisplayName = "FloatScope.secondaryDisplayName"
     static let userColor = "FloatScope.userColor"
-    static let agent1Color = "FloatScope.agent1Color"
-    static let agent2Color = "FloatScope.agent2Color"
+    static let primaryColor = "FloatScope.primaryColor"
+    static let secondaryColor = "FloatScope.secondaryColor"
     static let systemColor = "FloatScope.systemColor"
     static let showSystemMessages = "FloatScope.showSystemMessages"
     static let toggleShortcut = "FloatScope.toggleShortcut"
     static let screenReplayCacheEnabled = "FloatScope.screenReplayCacheEnabled"
+    static let appLanguage = "FloatScope.appLanguage"
+}
+
+enum AppLanguage: String, CaseIterable, Identifiable {
+    case system
+    case english
+    case chinese
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .system: "System"
+        case .english: "English"
+        case .chinese: "中文"
+        }
+    }
+
+    var resolvedIdentifier: String {
+        switch self {
+        case .english:
+            "en"
+        case .chinese:
+            "zh"
+        case .system:
+            Locale.preferredLanguages.first?.hasPrefix("zh") == true ? "zh" : "en"
+        }
+    }
+
+    var isChinese: Bool {
+        resolvedIdentifier == "zh"
+    }
+}
+
+enum L10n {
+    static func text(_ key: Key, language: AppLanguage = FloatScopeSettings().appLanguage) -> String {
+        language.isChinese ? key.zh : key.en
+    }
+
+    enum Key {
+        case addAttachment
+        case editLongText
+        case send
+        case modelPickerHelp
+        case history
+        case expand
+        case collapse
+        case screenCapture
+        case agentPickerHelp
+        case group
+        case configuredInSettings
+        case agentFallback
+        case effort
+        case variant
+        case conversationHistory
+        case refresh
+        case noHistoryTitle
+        case noHistoryDescription
+        case delete
+        case close
+        case messages
+        case collapseEditor
+        case settingsTitle
+        case agents
+        case userColor
+        case addAgent
+        case agentTitle
+        case agent1Model
+        case agent1Effort
+        case agent2Model
+        case agent2Variant
+        case conversationProject
+        case toggleShortcut
+        case launchAtLogin
+        case showSystemMessages
+        case screenReplayCache
+        case opacity
+        case watchInterval
+        case seconds
+        case cancel
+        case apply
+        case removeAgent
+        case id
+        case name
+        case kind
+        case color
+        case executable
+        case model
+        case appLanguage
+        case openFloatScope
+        case resetPosition
+        case conversationHistoryMenu
+        case newConversation
+        case toggleScreenWatch
+        case settings
+        case quit
+        case draft
+        case rollback
+        case ready
+        case newConversationStarted
+        case screenWatchStopped
+        case screenWatchStarted
+        case watchRandomHint
+        case watchFixedHint
+        case switched
+        case unknownAgent
+        case capturedScreen
+        case watchCaptureSent
+        case watchObservationPrompt
+        case attachmentPrompt
+        case currentMessageAttachments
+        case earlierGroupContextTruncated
+        case sessionStarted
+
+        var en: String {
+            switch self {
+            case .addAttachment: "Add image or file"
+            case .editLongText: "Edit long text"
+            case .send: "Send"
+            case .modelPickerHelp: "Choose model"
+            case .history: "History"
+            case .expand: "Expand"
+            case .collapse: "Collapse"
+            case .screenCapture: "Capture screen"
+            case .agentPickerHelp: "Choose agent"
+            case .group: "Group"
+            case .configuredInSettings: "Configured in Settings"
+            case .agentFallback: "Agent"
+            case .effort: "Effort"
+            case .variant: "Variant"
+            case .conversationHistory: "Conversation History"
+            case .refresh: "Refresh"
+            case .noHistoryTitle: "No History"
+            case .noHistoryDescription: "No FloatScope project conversations were found."
+            case .delete: "Delete"
+            case .close: "Close"
+            case .messages: "Messages"
+            case .collapseEditor: "Collapse editor"
+            case .settingsTitle: "FloatScope Settings"
+            case .agents: "Agents"
+            case .userColor: "User Color"
+            case .addAgent: "Add Agent"
+            case .agentTitle: "Agent"
+            case .agent1Model: "Agent 1 Model"
+            case .agent1Effort: "Agent 1 Effort"
+            case .agent2Model: "Agent 2 Model"
+            case .agent2Variant: "Agent 2 Variant"
+            case .conversationProject: "Conversation Project"
+            case .toggleShortcut: "Toggle Shortcut"
+            case .launchAtLogin: "Launch at Login"
+            case .showSystemMessages: "Show System Messages"
+            case .screenReplayCache: "Screen Replay Cache"
+            case .opacity: "Opacity"
+            case .watchInterval: "Watch Interval"
+            case .seconds: "Seconds"
+            case .cancel: "Cancel"
+            case .apply: "Apply"
+            case .removeAgent: "Remove Agent"
+            case .id: "ID"
+            case .name: "Name"
+            case .kind: "Kind"
+            case .color: "Color"
+            case .executable: "Executable"
+            case .model: "Model"
+            case .appLanguage: "Language"
+            case .openFloatScope: "Open FloatScope"
+            case .resetPosition: "Reset Position"
+            case .conversationHistoryMenu: "Conversation History..."
+            case .newConversation: "New Conversation"
+            case .toggleScreenWatch: "Toggle Screen Watch"
+            case .settings: "Settings..."
+            case .quit: "Quit FloatScope"
+            case .draft: "Draft"
+            case .rollback: "Rollback"
+            case .ready: "FloatScope ready."
+            case .newConversationStarted: "Started a new FloatScope conversation."
+            case .screenWatchStopped: "Screen watch stopped."
+            case .screenWatchStarted: "Screen watch started."
+            case .watchRandomHint: "Use the status bar screen-watch controls."
+            case .watchFixedHint: "Use the status bar screen-watch controls."
+            case .switched: "Switched."
+            case .unknownAgent: "Unknown agent"
+            case .capturedScreen: "Captured screen"
+            case .watchCaptureSent: "Watch capture sent."
+            case .watchObservationPrompt: "Scheduled screen capture: please give a brief observation from this screenshot."
+            case .attachmentPrompt: "Please review these attachments."
+            case .currentMessageAttachments: "Current message attachments"
+            case .earlierGroupContextTruncated: "earlier group context truncated"
+            case .sessionStarted: "session started."
+            }
+        }
+
+        var zh: String {
+            switch self {
+            case .addAttachment: "添加图像或文件"
+            case .editLongText: "编辑长文本"
+            case .send: "发送"
+            case .modelPickerHelp: "选择模型"
+            case .history: "聊天记录"
+            case .expand: "展开"
+            case .collapse: "收回"
+            case .screenCapture: "截屏"
+            case .agentPickerHelp: "选择聊天对象"
+            case .group: "群聊"
+            case .configuredInSettings: "在设置中配置"
+            case .agentFallback: "Agent"
+            case .effort: "智能等级"
+            case .variant: "模式"
+            case .conversationHistory: "聊天记录"
+            case .refresh: "刷新"
+            case .noHistoryTitle: "暂无记录"
+            case .noHistoryDescription: "没有找到 FloatScope 项目的对话。"
+            case .delete: "删除"
+            case .close: "关闭"
+            case .messages: "条消息"
+            case .collapseEditor: "收起编辑器"
+            case .settingsTitle: "FloatScope 设置"
+            case .agents: "Agent"
+            case .userColor: "用户颜色"
+            case .addAgent: "添加 Agent"
+            case .agentTitle: "Agent"
+            case .agent1Model: "Agent 1 模型"
+            case .agent1Effort: "Agent 1 智能等级"
+            case .agent2Model: "Agent 2 模型"
+            case .agent2Variant: "Agent 2 模式"
+            case .conversationProject: "对话项目"
+            case .toggleShortcut: "显示/隐藏快捷键"
+            case .launchAtLogin: "开机启动"
+            case .showSystemMessages: "显示系统消息"
+            case .screenReplayCache: "屏幕回放缓存"
+            case .opacity: "透明度"
+            case .watchInterval: "读屏间隔"
+            case .seconds: "秒"
+            case .cancel: "取消"
+            case .apply: "应用"
+            case .removeAgent: "移除 Agent"
+            case .id: "ID"
+            case .name: "名称"
+            case .kind: "类型"
+            case .color: "颜色"
+            case .executable: "可执行文件"
+            case .model: "模型"
+            case .appLanguage: "语言"
+            case .openFloatScope: "打开 FloatScope"
+            case .resetPosition: "重置位置"
+            case .conversationHistoryMenu: "聊天记录..."
+            case .newConversation: "新建对话"
+            case .toggleScreenWatch: "切换定时读屏"
+            case .settings: "设置..."
+            case .quit: "退出 FloatScope"
+            case .draft: "草稿"
+            case .rollback: "回退"
+            case .ready: "FloatScope 已就绪。"
+            case .newConversationStarted: "已开启新的 FloatScope 对话。"
+            case .screenWatchStopped: "已停止读屏。"
+            case .screenWatchStarted: "已开始读屏。"
+            case .watchRandomHint: "请使用状态栏里的定时读屏开关。"
+            case .watchFixedHint: "请使用状态栏里的定时读屏开关。"
+            case .switched: "已切换。"
+            case .unknownAgent: "未知 Agent"
+            case .capturedScreen: "已截屏"
+            case .watchCaptureSent: "已发送读屏截图。"
+            case .watchObservationPrompt: "定时读屏：请根据这张屏幕截图给出简短观察。"
+            case .attachmentPrompt: "请看这些附件。"
+            case .currentMessageAttachments: "当前消息附件"
+            case .earlierGroupContextTruncated: "更早的群聊上下文已截断"
+            case .sessionStarted: "会话已启动。"
+            }
+        }
+    }
 }
 
 struct FloatScopeSettings {
     var defaultAgent: AgentID {
-        get { AgentID(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.defaultAgent) ?? "") ?? .agent1 }
+        get { AgentID(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.defaultAgent) ?? "") ?? .primary }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKeys.defaultAgent) }
     }
 
@@ -569,20 +836,20 @@ struct FloatScopeSettings {
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.opencodePath) }
     }
 
-    var agent1DisplayName: String {
+    var primaryDisplayName: String {
         get {
-            let stored = UserDefaults.standard.string(forKey: SettingsKeys.agent1DisplayName)
-            return stored == "Agent 1" ? "agent1" : (stored ?? AgentHubConfigStore.agent(at: 0).displayName)
+            let stored = UserDefaults.standard.string(forKey: SettingsKeys.primaryDisplayName)
+            return stored == "Primary" ? "agent1" : (stored ?? AgentHubConfigStore.agent(at: 0).displayName)
         }
-        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.agent1DisplayName) }
+        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.primaryDisplayName) }
     }
 
-    var agent2DisplayName: String {
+    var secondaryDisplayName: String {
         get {
-            let stored = UserDefaults.standard.string(forKey: SettingsKeys.agent2DisplayName)
-            return stored == "Agent 2" ? "agent2" : (stored ?? AgentHubConfigStore.agent(at: 1).displayName)
+            let stored = UserDefaults.standard.string(forKey: SettingsKeys.secondaryDisplayName)
+            return stored == "Secondary" ? "agent2" : (stored ?? AgentHubConfigStore.agent(at: 1).displayName)
         }
-        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.agent2DisplayName) }
+        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.secondaryDisplayName) }
     }
 
     var userColorHex: String {
@@ -590,14 +857,14 @@ struct FloatScopeSettings {
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.userColor) }
     }
 
-    var agent1ColorHex: String {
-        get { UserDefaults.standard.string(forKey: SettingsKeys.agent1Color) ?? AgentHubConfigStore.agent(at: 0).color }
-        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.agent1Color) }
+    var primaryColorHex: String {
+        get { UserDefaults.standard.string(forKey: SettingsKeys.primaryColor) ?? AgentHubConfigStore.agent(at: 0).color }
+        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.primaryColor) }
     }
 
-    var agent2ColorHex: String {
-        get { UserDefaults.standard.string(forKey: SettingsKeys.agent2Color) ?? AgentHubConfigStore.agent(at: 1).color }
-        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.agent2Color) }
+    var secondaryColorHex: String {
+        get { UserDefaults.standard.string(forKey: SettingsKeys.secondaryColor) ?? AgentHubConfigStore.agent(at: 1).color }
+        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.secondaryColor) }
     }
 
     var systemColorHex: String {
@@ -607,11 +874,11 @@ struct FloatScopeSettings {
 
     var visuals: AgentVisualConfig {
         AgentVisualConfig(
-            agent1Name: agent1DisplayName,
-            agent2Name: agent2DisplayName,
+            agent1Name: primaryDisplayName,
+            agent2Name: secondaryDisplayName,
             userColorHex: userColorHex,
-            agent1ColorHex: agent1ColorHex,
-            agent2ColorHex: agent2ColorHex,
+            agent1ColorHex: primaryColorHex,
+            agent2ColorHex: secondaryColorHex,
             systemColorHex: systemColorHex
         )
     }
@@ -658,6 +925,13 @@ struct FloatScopeSettings {
     var toggleShortcut: String {
         get { UserDefaults.standard.string(forKey: SettingsKeys.toggleShortcut) ?? "Option+Space" }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.toggleShortcut) }
+    }
+
+    var appLanguage: AppLanguage {
+        get {
+            AppLanguage(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.appLanguage) ?? "") ?? .system
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKeys.appLanguage) }
     }
 
     var codexModelPreset: CodexModelPreset {

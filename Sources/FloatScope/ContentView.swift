@@ -172,7 +172,7 @@ private struct CapsuleBar: View {
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.plain)
-                    .help("添加图像或文件")
+                    .help(L10n.text(.addAttachment, language: model.settings.appLanguage))
 
                     AgentPickerMenu(model: model, mood: activeMood)
 
@@ -193,7 +193,7 @@ private struct CapsuleBar: View {
                         }
                         .buttonStyle(.plain)
                         .frame(minWidth: 80)
-                        .help("编辑长文本")
+                        .help(L10n.text(.editLongText, language: model.settings.appLanguage))
                     } else {
                         AppKitSingleLineInput(
                             text: $model.inputText,
@@ -227,25 +227,25 @@ private struct CapsuleBar: View {
                             .frame(width: 24, height: 24)
                     }
                     .buttonStyle(.plain)
-                    .help("发送")
+                    .help(L10n.text(.send, language: model.settings.appLanguage))
                 }
                 .frame(height: 26)
 
                 HStack(spacing: 18) {
                     ModelPickerMenu(model: model)
 
-                    IconButton(systemName: "clock.arrow.circlepath", help: "聊天记录") {
+                    IconButton(systemName: "clock.arrow.circlepath", help: L10n.text(.history, language: model.settings.appLanguage)) {
                         model.openHistoryPicker()
                     }
 
                     IconButton(
                         systemName: model.isExpanded ? "chevron.down.circle" : "chevron.up.circle",
-                        help: model.isExpanded ? "收回对话" : "展开对话"
+                        help: model.isExpanded ? L10n.text(.collapse, language: model.settings.appLanguage) : L10n.text(.expand, language: model.settings.appLanguage)
                     ) {
                         model.toggleExpanded()
                     }
 
-                    IconButton(systemName: model.watchMode == nil ? "camera" : "camera.fill", help: "看屏幕") {
+                    IconButton(systemName: model.watchMode == nil ? "camera" : "camera.fill", help: L10n.text(.screenCapture, language: model.settings.appLanguage)) {
                         model.manualScreenCapture()
                     }
                 }
@@ -288,7 +288,7 @@ private struct CapsuleBar: View {
         let flattened = model.inputText
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return flattened.isEmpty ? "Draft" : flattened
+        return flattened.isEmpty ? L10n.text(.draft, language: model.settings.appLanguage) : flattened
     }
 }
 
@@ -309,7 +309,7 @@ private struct AgentPickerMenu: View {
         }
         .buttonStyle(.plain)
         .frame(width: 22, height: 22)
-        .help("选择聊天对象")
+        .help(L10n.text(.agentPickerHelp, language: model.settings.appLanguage))
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 2) {
                 Button {
@@ -319,7 +319,7 @@ private struct AgentPickerMenu: View {
                 } label: {
                     HStack(spacing: 8) {
                         autoDots
-                        Text("Group")
+                        Text(L10n.text(.group, language: model.settings.appLanguage))
                         Spacer()
                         if isGroupSelected {
                             Image(systemName: "checkmark")
@@ -739,7 +739,7 @@ private struct MessageBubble: View {
                 Button {
                     onEditForResend()
                 } label: {
-                    Label("重新编辑并发送", systemImage: "pencil")
+                    Label(L10n.text(.rollback, language: FloatScopeSettings().appLanguage), systemImage: "arrow.uturn.backward")
                 }
             }
         }
@@ -828,7 +828,7 @@ private struct ModelPickerMenu: View {
         }
         .buttonStyle(.plain)
         .frame(width: 22, height: 22)
-        .help("选择当前人格使用的模型")
+        .help(L10n.text(.modelPickerHelp, language: model.settings.appLanguage))
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             modelPickerContent
                 .padding(10)
@@ -868,7 +868,7 @@ private struct ModelPickerMenu: View {
             }
             .frame(width: 250, height: 220)
         } else {
-            Text("Configured in Settings")
+            Text(L10n.text(.configuredInSettings, language: model.settings.appLanguage))
                 .padding(.horizontal, 10)
         }
     }
@@ -897,7 +897,7 @@ private struct ModelPickerMenu: View {
             Circle()
                 .fill(Color(hex: agent?.color ?? "#8E8E93"))
                 .frame(width: 9, height: 9)
-            Text(agent?.displayName ?? "Agent")
+            Text(agent?.displayName ?? L10n.text(.agentFallback, language: model.settings.appLanguage))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             Spacer()
@@ -909,7 +909,7 @@ private struct ModelPickerMenu: View {
     private func genericAgentColumn(agent: AgentRuntimeConfig) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             agentHeader(agent)
-            Text(agent.model ?? "Configured in Settings")
+            Text(agent.model ?? L10n.text(.configuredInSettings, language: model.settings.appLanguage))
                 .font(.caption)
                 .padding(.horizontal, 10)
             Text(agent.effort ?? agent.variant ?? "")
@@ -931,7 +931,7 @@ private struct ModelPickerMenu: View {
             .buttonStyle(.plain)
         }
         Divider().padding(.vertical, 2)
-        Text("Effort")
+        Text(L10n.text(.effort, language: model.settings.appLanguage))
             .font(.caption)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
@@ -988,7 +988,7 @@ private struct ModelPickerMenu: View {
             .buttonStyle(.plain)
         }
         Divider().padding(.vertical, 2)
-        Text("Variant")
+        Text(L10n.text(.variant, language: model.settings.appLanguage))
             .font(.caption)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
@@ -1024,7 +1024,7 @@ private struct HistoryPickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Conversation History")
+                Text(L10n.text(.conversationHistory, language: model.settings.appLanguage))
                     .font(.headline)
                 Spacer()
                 Button {
@@ -1033,7 +1033,7 @@ private struct HistoryPickerView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
-                .help("Refresh")
+                .help(L10n.text(.refresh, language: model.settings.appLanguage))
             }
 
             if model.historyEntries.isEmpty {
@@ -1041,7 +1041,11 @@ private struct HistoryPickerView: View {
                     ProgressView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    ContentUnavailableView("No History", systemImage: "clock", description: Text("No FloatScope project conversations were found."))
+                    ContentUnavailableView(
+                        L10n.text(.noHistoryTitle, language: model.settings.appLanguage),
+                        systemImage: "clock",
+                        description: Text(L10n.text(.noHistoryDescription, language: model.settings.appLanguage))
+                    )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
@@ -1051,14 +1055,14 @@ private struct HistoryPickerView: View {
                             Button {
                                 model.selectHistory(entry)
                             } label: {
-                                HistoryRow(entry: entry, agents: model.agentConfigs)
+                                HistoryRow(entry: entry, agents: model.agentConfigs, language: model.settings.appLanguage)
                             }
                             .buttonStyle(.plain)
                             .contextMenu {
                                 Button(role: .destructive) {
                                     model.deleteHistory(entry)
                                 } label: {
-                                    Label("Delete", systemImage: "trash")
+                                    Label(L10n.text(.delete, language: model.settings.appLanguage), systemImage: "trash")
                                 }
                             }
                         }
@@ -1069,7 +1073,7 @@ private struct HistoryPickerView: View {
 
             HStack {
                 Spacer()
-                Button("Close") {
+                Button(L10n.text(.close, language: model.settings.appLanguage)) {
                     model.showHistory = false
                 }
             }
@@ -1085,6 +1089,7 @@ private struct HistoryPickerView: View {
 private struct HistoryRow: View {
     let entry: ConversationHistoryEntry
     let agents: [AgentRuntimeConfig]
+    let language: AppLanguage
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -1108,7 +1113,7 @@ private struct HistoryRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
-                Text("\(entry.messageCount) Messages")
+                Text("\(entry.messageCount) \(L10n.text(.messages, language: language))")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -1220,7 +1225,7 @@ private struct LongInputEditorView: View {
                         .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.plain)
-                .help("收起编辑器")
+                .help(L10n.text(.collapseEditor, language: model.settings.appLanguage))
 
                 Spacer()
 
@@ -1237,7 +1242,7 @@ private struct LongInputEditorView: View {
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
-                .help("发送")
+                .help(L10n.text(.send, language: model.settings.appLanguage))
                 .disabled(model.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.pendingAttachments.isEmpty)
             }
 
@@ -1351,21 +1356,31 @@ private struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("FloatScope Settings")
+                Text(L10n.text(.settingsTitle, language: model.settings.appLanguage))
                     .font(.headline)
 
-                GroupBox("Agents") {
+                Picker(L10n.text(.appLanguage, language: model.settings.appLanguage), selection: Binding(
+                    get: { model.settings.appLanguage },
+                    set: { model.settings.appLanguage = $0 }
+                )) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.displayName).tag(language)
+                    }
+                }
+
+                GroupBox(L10n.text(.agents, language: model.settings.appLanguage)) {
                     VStack(alignment: .leading, spacing: 12) {
-                        colorField("User Color", color: model.settings.visuals.userColor, text: Binding(
+                        colorField(L10n.text(.userColor, language: model.settings.appLanguage), color: model.settings.visuals.userColor, text: Binding(
                             get: { model.settings.userColorHex },
                             set: { model.settings.userColorHex = $0 }
                         ))
 
                         ForEach(Array(model.agentConfigs.enumerated()), id: \.element.id) { index, agent in
                             AgentConfigCard(
-                                title: "Agent \(index + 1)",
+                                title: "\(L10n.text(.agentTitle, language: model.settings.appLanguage)) \(index + 1)",
                                 config: binding(for: agent.id),
                                 canRemove: model.agentConfigs.count > 1,
+                                language: model.settings.appLanguage,
                                 onRemove: {
                                     model.removeAgentConfig(id: agent.id)
                                 }
@@ -1375,13 +1390,13 @@ private struct SettingsView: View {
                         Button {
                             model.addAgentConfig()
                         } label: {
-                            Label("Add Agent", systemImage: "plus.circle")
+                            Label(L10n.text(.addAgent, language: model.settings.appLanguage), systemImage: "plus.circle")
                         }
                     }
                     .padding(.vertical, 4)
                 }
 
-                Picker("Agent 1 Model", selection: $model.codexModelPreset) {
+                Picker(L10n.text(.agent1Model, language: model.settings.appLanguage), selection: $model.codexModelPreset) {
                     ForEach(CodexModelPreset.allCases) { preset in
                         Text(preset.displayName).tag(preset)
                     }
@@ -1390,7 +1405,7 @@ private struct SettingsView: View {
                     model.setCodexModelPreset(value)
                 }
 
-                Picker("Agent 1 Effort", selection: $model.codexEffortPreset) {
+                Picker(L10n.text(.agent1Effort, language: model.settings.appLanguage), selection: $model.codexEffortPreset) {
                     ForEach(ReasoningEffortPreset.allCases) { preset in
                         Text(preset.displayName).tag(preset)
                     }
@@ -1399,7 +1414,7 @@ private struct SettingsView: View {
                     model.setCodexEffortPreset(value)
                 }
 
-                Picker("Agent 2 Model", selection: $model.secondaryModelPreset) {
+                Picker(L10n.text(.agent2Model, language: model.settings.appLanguage), selection: $model.secondaryModelPreset) {
                     Section("OpenCode Zen") {
                         ForEach(OpenCodeModelPreset.opencodeZenCases) { preset in
                             Text(preset.displayName).tag(preset)
@@ -1420,7 +1435,7 @@ private struct SettingsView: View {
                     model.setSecondaryModelPreset(value)
                 }
 
-                Picker("Agent 2 Variant", selection: $model.secondaryVariantPreset) {
+                Picker(L10n.text(.agent2Variant, language: model.settings.appLanguage), selection: $model.secondaryVariantPreset) {
                     ForEach(OpenCodeVariantPreset.allCases) { preset in
                         Text(preset.displayName).tag(preset)
                     }
@@ -1429,33 +1444,33 @@ private struct SettingsView: View {
                     model.setSecondaryVariantPreset(value)
                 }
 
-                settingsTextField("Conversation Project", text: Binding(
+                settingsTextField(L10n.text(.conversationProject, language: model.settings.appLanguage), text: Binding(
                     get: { model.settings.conversationRoot },
                     set: { model.settings.conversationRoot = $0 }
                 ))
 
-                settingsTextField("Toggle Shortcut", text: Binding(
+                settingsTextField(L10n.text(.toggleShortcut, language: model.settings.appLanguage), text: Binding(
                     get: { model.settings.toggleShortcut },
                     set: { model.settings.toggleShortcut = $0 }
                 ))
 
-                Toggle("Launch at Login", isOn: Binding(
+                Toggle(L10n.text(.launchAtLogin, language: model.settings.appLanguage), isOn: Binding(
                     get: { model.settings.launchAtLogin },
                     set: { model.settings.launchAtLogin = $0 }
                 ))
 
-                Toggle("Show System Messages", isOn: Binding(
+                Toggle(L10n.text(.showSystemMessages, language: model.settings.appLanguage), isOn: Binding(
                     get: { model.settings.showSystemMessages },
                     set: { model.settings.showSystemMessages = $0 }
                 ))
 
-                Toggle("Screen Replay Cache", isOn: Binding(
+                Toggle(L10n.text(.screenReplayCache, language: model.settings.appLanguage), isOn: Binding(
                     get: { model.settings.screenReplayCacheEnabled },
                     set: { model.settings.screenReplayCacheEnabled = $0 }
                 ))
 
                 HStack {
-                    Text("Opacity")
+                    Text(L10n.text(.opacity, language: model.settings.appLanguage))
                     Slider(value: Binding(
                         get: { Double(model.settings.capsuleOpacity) },
                         set: { model.settings.capsuleOpacity = CGFloat($0) }
@@ -1463,22 +1478,22 @@ private struct SettingsView: View {
                 }
 
                 HStack {
-                    Text("Watch Interval")
+                    Text(L10n.text(.watchInterval, language: model.settings.appLanguage))
                     TextField("60", value: Binding(
                         get: { model.settings.watchDefaultInterval },
                         set: { model.settings.watchDefaultInterval = $0 }
                     ), format: .number)
                     .frame(width: 80)
-                    Text("Seconds")
+                    Text(L10n.text(.seconds, language: model.settings.appLanguage))
                         .foregroundStyle(.secondary)
                 }
 
                 HStack {
                     Spacer()
-                    Button("Cancel") {
+                    Button(L10n.text(.cancel, language: model.settings.appLanguage)) {
                         model.showSettings = false
                     }
-                    Button("Apply") {
+                    Button(L10n.text(.apply, language: model.settings.appLanguage)) {
                         model.applySettings()
                     }
                     .keyboardShortcut(.defaultAction)
@@ -1528,6 +1543,7 @@ private struct AgentConfigCard: View {
     let title: String
     @Binding var config: AgentRuntimeConfig
     let canRemove: Bool
+    let language: AppLanguage
     let onRemove: () -> Void
 
     var body: some View {
@@ -1542,17 +1558,17 @@ private struct AgentConfigCard: View {
                         Image(systemName: "minus.circle")
                     }
                     .buttonStyle(.plain)
-                    .help("Remove Agent")
+                    .help(L10n.text(.removeAgent, language: language))
                 }
             }
 
-            row("ID") {
+            row(L10n.text(.id, language: language)) {
                 TextField("agent-id", text: $config.id)
             }
-            row("Name") {
+            row(L10n.text(.name, language: language)) {
                 TextField("Agent Name", text: $config.displayName)
             }
-            row("Kind") {
+            row(L10n.text(.kind, language: language)) {
                 Picker("", selection: $config.kind) {
                     Text("Codex App Server").tag("codex-app-server")
                     Text("OpenCode Run").tag("opencode-run")
@@ -1562,7 +1578,7 @@ private struct AgentConfigCard: View {
                 }
                 .labelsHidden()
             }
-            row("Color") {
+            row(L10n.text(.color, language: language)) {
                 HStack {
                     Circle()
                         .fill(Color(hex: config.color))
@@ -1570,10 +1586,10 @@ private struct AgentConfigCard: View {
                     TextField("#RRGGBB", text: $config.color)
                 }
             }
-            row("Executable") {
+            row(L10n.text(.executable, language: language)) {
                 TextField("/path/to/cli", text: $config.executablePath)
             }
-            row("Model") {
+            row(L10n.text(.model, language: language)) {
                 if let models = config.models, !models.isEmpty {
                     Picker("", selection: Binding(
                         get: { config.model ?? models.first ?? "" },
@@ -1591,7 +1607,7 @@ private struct AgentConfigCard: View {
                     ))
                 }
             }
-            row("Effort") {
+            row(L10n.text(.effort, language: language)) {
                 let options = config.kind == "opencode-run" ? (config.variants ?? []) : (config.efforts ?? [])
                 if !options.isEmpty {
                     Picker("", selection: Binding(

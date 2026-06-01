@@ -90,6 +90,17 @@ final class AgentBridge: @unchecked Sendable {
         }
     }
 
+    func rollback(agents: [String], numTurns: Int) {
+        guard numTurns > 0 else { return }
+        for agent in agents {
+            if agent == codex?.agentID {
+                codex?.rollbackLastTurns(numTurns)
+            } else if agent == opencode?.agentID {
+                opencode?.rollbackLastTurns(numTurns)
+            }
+        }
+    }
+
     func stopAll() {
         codex?.stop()
         opencode?.stop()
@@ -290,6 +301,28 @@ private final class CodexAppServerSession: @unchecked Sendable {
             UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadId)
             UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadRoot)
             UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadTitle)
+        }
+    }
+
+    func rollbackLastTurns(_ count: Int) {
+        queue.async { [weak self] in
+            guard let self, count > 0 else { return }
+            self.startLocked()
+            guard let threadID = self.threadID else { return }
+            self.requestLocked(method: "thread/rollback", params: [
+                "threadId": threadID,
+                "numTurns": count
+            ]) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.threadLoaded = true
+                    CodexHistoryVisibilityRegistrar.register(threadID: threadID, workspaceRoot: self.context.rootPath)
+                    CodexHistoryVisibilityRegistrar.registerSoon(threadID: threadID, workspaceRoot: self.context.rootPath)
+                case .failure(let error):
+                    self.onEvent?(.failed(self.agentID, "Unable to roll back Codex thread: \(error.localizedDescription)"))
+                }
+            }
         }
     }
 
@@ -659,7 +692,7 @@ private final class OpencodeRunSession: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             guard self.runningProcess == nil else {
-                self.onEvent?(.failed(agentID, "Agent 2 is still responding."))
+                self.onEvent?(.failed(agentID, "Agent is still responding."))
                 return
             }
             self.runLocked(message: message, attachments: attachments, modelPreset: modelPreset, variantPreset: variantPreset)
@@ -680,6 +713,13 @@ private final class OpencodeRunSession: @unchecked Sendable {
             UserDefaults.standard.removeObject(forKey: NativeSessionKeys.opencodeSessionId)
             UserDefaults.standard.removeObject(forKey: NativeSessionKeys.opencodeSessionRoot)
             UserDefaults.standard.removeObject(forKey: NativeSessionKeys.opencodeSessionTitle)
+        }
+    }
+
+    func rollbackLastTurns(_ count: Int) {
+        queue.async { [weak self] in
+            guard let self, count > 0, let sessionID else { return }
+            OpenCodeHistoryVisibilityRegistrar.rollbackLastTurns(sessionID: sessionID, count: count, workspaceRoot: self.context.rootPath)
         }
     }
 
@@ -1103,6 +1143,39 @@ private enum OpenCodeHistoryVisibilityRegistrar {
             return nil
         }
         return object["text"] as? String
+    }
+
+    static func rollbackLastTurns(sessionID: String, count: Int, workspaceRoot: String) {
+        let escapedSession = escape(sessionID)
+        let safeCount = max(1, count)
+        let cutoff = """
+        (select time_created
+         from message
+         where session_id = '\(escapedSession)'
+           and json_extract(data, '$.role') = 'user'
+         order by time_created desc
+         limit 1 offset \(safeCount - 1))
+        """
+        let sql = """
+        delete from part
+        where session_id = '\(escapedSession)'
+          and message_id in (
+            select id from message
+            where session_id = '\(escapedSession)'
+              and time_created >= \(cutoff)
+          );
+        delete from message
+        where session_id = '\(escapedSession)'
+          and time_created >= \(cutoff);
+        update session
+        set time_updated = coalesce(
+                (select max(time_created) from message where session_id = '\(escapedSession)'),
+                time_updated
+            )
+        where id = '\(escapedSession)';
+        """
+        run(sql)
+        registerSession(sessionID: sessionID, workspaceRoot: workspaceRoot)
     }
 
     private static func run(_ sql: String) {

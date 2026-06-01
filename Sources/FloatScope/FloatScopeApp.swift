@@ -82,19 +82,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func installStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let item = statusItem ?? NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let language = FloatScopeSettings().appLanguage
         item.button?.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: "FloatScope")
         item.button?.imagePosition = .imageOnly
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open FloatScope", action: #selector(openFloatScope), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Reset Position", action: #selector(resetPosition), keyEquivalent: "r"))
-        menu.addItem(NSMenuItem(title: "Conversation History...", action: #selector(openHistory), keyEquivalent: "h"))
-        menu.addItem(NSMenuItem(title: "New Conversation", action: #selector(newConversation), keyEquivalent: "n"))
+        menu.addItem(NSMenuItem(title: L10n.text(.openFloatScope, language: language), action: #selector(openFloatScope), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: L10n.text(.resetPosition, language: language), action: #selector(resetPosition), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: L10n.text(.conversationHistoryMenu, language: language), action: #selector(openHistory), keyEquivalent: "h"))
+        menu.addItem(NSMenuItem(title: L10n.text(.newConversation, language: language), action: #selector(newConversation), keyEquivalent: "n"))
+        menu.addItem(NSMenuItem(title: L10n.text(.toggleScreenWatch, language: language), action: #selector(toggleScreenWatch), keyEquivalent: "w"))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: L10n.text(.settings, language: language), action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit FloatScope", action: #selector(quitFloatScope), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: L10n.text(.quit, language: language), action: #selector(quitFloatScope), keyEquivalent: "q"))
         for item in menu.items {
             item.target = self
         }
@@ -131,6 +133,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model?.startNewConversation()
     }
 
+    @objc private func toggleScreenWatch() {
+        panel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        model?.toggleDefaultScreenWatch()
+    }
+
     @objc private func resetPosition() {
         guard let panel else { return }
         let frame = Self.defaultFrame(width: panel.frame.width)
@@ -143,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func settingsApplied() {
         installHotKey()
+        installStatusItem()
     }
 
     @objc private func quitFloatScope() {

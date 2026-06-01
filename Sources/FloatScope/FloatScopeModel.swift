@@ -34,7 +34,7 @@ final class FloatScopeModel: ObservableObject {
     init() {
         AgentHubConfigStore.ensureUserConfig()
         let storedAgent = AgentID(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.selectedAgent) ?? "")
-        let storedDefault = AgentID(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.defaultAgent) ?? "") ?? .agent1
+        let storedDefault = AgentID(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.defaultAgent) ?? "") ?? .primary
         selectedAgent = storedAgent ?? storedDefault
         selectedAgentID = UserDefaults.standard.string(forKey: SettingsKeys.selectedAgentID) ?? "agent1"
         let storedSettings = FloatScopeSettings()
@@ -65,7 +65,7 @@ final class FloatScopeModel: ObservableObject {
         }
         screenWatcher.setRollingCacheEnabled(settings.screenReplayCacheEnabled)
         bridge.startAll()
-        appendSystem("FloatScope ready.")
+        appendSystem(L10n.text(.ready, language: settings.appLanguage))
     }
 
     func stop() {
@@ -90,7 +90,7 @@ final class FloatScopeModel: ObservableObject {
 
         let agents = resolveAgentIDs(for: trimmed)
         guard !agents.isEmpty else { return }
-        let message = trimmed.isEmpty ? "请看这些附件。" : trimmed
+        let message = trimmed.isEmpty ? L10n.text(.attachmentPrompt, language: settings.appLanguage) : trimmed
         if isGroupAgentID(selectedAgentID), agents.count > 1 {
             bridge.prepareGroupConversationIfNeeded()
         }
@@ -104,17 +104,33 @@ final class FloatScopeModel: ObservableObject {
     }
 
     func editMessageForResend(_ message: ChatMessage) {
-        guard case .user = message.role else { return }
+        guard case .user = message.role,
+              let index = messages.firstIndex(where: { $0.id == message.id }) else { return }
+        let removedMessages = messages[index...]
+        let turnsToRollback = removedMessages.reduce(0) { count, item in
+            if case .user = item.role { return count + 1 }
+            return count
+        }
+        let targetAgents = resolveAgentIDs(for: "")
+
         inputText = message.text
         pendingAttachments = message.attachments
             .map(\.url)
             .filter { FileManager.default.fileExists(atPath: $0.path) }
         showLongInputEditor = needsLongInputEditor
+        messages.removeSubrange(index..<messages.endIndex)
+        currentAgentResponse.removeAll()
+        pendingResponseAgents.removeAll()
+        for agent in targetAgents {
+            moods[agent] = .idle
+        }
+        saveTranscript()
+        bridge.rollback(agents: targetAgents, numTurns: turnsToRollback)
         expand()
     }
 
     func manualScreenCapture() {
-        sendWithFreshScreenCapture(prompt: "你看这个")
+        sendWithFreshScreenCapture(prompt: settings.appLanguage.isChinese ? "你看这个" : "Look at this")
     }
 
     func addAttachments() {
@@ -265,8 +281,23 @@ final class FloatScopeModel: ObservableObject {
         pendingResponseAgents.removeAll()
         messages.removeAll()
         TranscriptStore.clear()
-        appendSystem("Started a new FloatScope conversation.")
+        appendSystem(L10n.text(.newConversationStarted, language: settings.appLanguage))
         expand()
+    }
+
+    func toggleDefaultScreenWatch() {
+        if watchMode != nil {
+            scheduler?.stop()
+            watchMode = nil
+            resetMoodMap()
+            appendSystem(L10n.text(.screenWatchStopped, language: settings.appLanguage))
+            return
+        }
+
+        let mode = WatchIntervalMode.fixed(settings.watchDefaultInterval)
+        watchMode = mode
+        scheduler?.start(intervalMode: mode)
+        appendSystem(L10n.text(.screenWatchStarted, language: settings.appLanguage))
     }
 
     func openHistoryPicker() {
@@ -350,13 +381,13 @@ final class FloatScopeModel: ObservableObject {
 
     private func persistAgentConfigs() {
         if agentConfigs.indices.contains(0) {
-            settings.agent1DisplayName = agentConfigs[0].displayName
-            settings.agent1ColorHex = agentConfigs[0].color
+            settings.primaryDisplayName = agentConfigs[0].displayName
+            settings.primaryColorHex = agentConfigs[0].color
             settings.codexPath = agentConfigs[0].executablePath
         }
         if agentConfigs.indices.contains(1) {
-            settings.agent2DisplayName = agentConfigs[1].displayName
-            settings.agent2ColorHex = agentConfigs[1].color
+            settings.secondaryDisplayName = agentConfigs[1].displayName
+            settings.secondaryColorHex = agentConfigs[1].color
             settings.opencodePath = agentConfigs[1].executablePath
         }
         let config = AgentHubConfig(version: 1, conversationRoot: settings.conversationRoot, agents: agentConfigs)
@@ -428,7 +459,7 @@ final class FloatScopeModel: ObservableObject {
                 for agent in agents {
                     bridge.send(agent: agent, message: outboundMessage(prompt, groupAgents: agents), attachments: [stableURL], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
                 }
-                appendSystem("Captured screen: \(url.lastPathComponent)")
+                appendSystem("\(L10n.text(.capturedScreen, language: settings.appLanguage)): \(url.lastPathComponent)")
                 for agent in agents {
                     moods[agent] = .thinking
                 }
@@ -454,10 +485,10 @@ final class FloatScopeModel: ObservableObject {
             for agent in agents {
                 moods[agent] = .watching
                 currentAgentResponse[agent] = nil
-                let message = "定时读屏：请根据这张屏幕截图给出简短观察。"
+                let message = L10n.text(.watchObservationPrompt, language: settings.appLanguage)
                 bridge.send(agent: agent, message: outboundMessage(message, groupAgents: agents, currentMessageAlreadyAppended: false), attachments: [url], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
             }
-            appendSystem("Watch capture sent.")
+            appendSystem(L10n.text(.watchCaptureSent, language: settings.appLanguage))
             for agent in agents {
                 moods[agent] = .thinking
             }
@@ -486,9 +517,6 @@ final class FloatScopeModel: ObservableObject {
         let lower = text.lowercased()
         if let matched = agentConfigs.first(where: { lower.contains($0.id.lowercased()) || lower.contains($0.displayName.lowercased()) }) {
             return matched.id
-        }
-        if lower.contains("agent2") || text.contains("agent2") {
-            return agentConfigs.dropFirst().first?.id ?? agentConfigs.first?.id ?? "agent1"
         }
         return agentConfigs.first?.id ?? "agent1"
     }
@@ -554,7 +582,7 @@ final class FloatScopeModel: ObservableObject {
     private func currentAttachmentNote() -> String {
         guard let current = messages.last, !current.attachments.isEmpty else { return "" }
         let names = current.attachments.map(\.filename).joined(separator: ", ")
-        return "\n当前消息附件：\(names)"
+        return "\n\(L10n.text(.currentMessageAttachments, language: settings.appLanguage)): \(names)"
     }
 
     private static func compactedContextText(_ text: String) -> String {
@@ -569,14 +597,14 @@ final class FloatScopeModel: ObservableObject {
     private static func truncatedContext(_ text: String) -> String {
         guard text.count > 3_200 else { return text }
         let index = text.index(text.endIndex, offsetBy: -3_200)
-        return "...[earlier group context truncated]\n" + String(text[index...])
+        return "...[\(L10n.text(.earlierGroupContextTruncated))]\n" + String(text[index...])
     }
 
     private func handleBridgeEvent(_ event: AgentBridgeEvent) {
         switch event {
         case .started(let agent):
             moods[agent] = .idle
-            appendSystem("\(name(for: agent)) session started.")
+            appendSystem("\(name(for: agent)) \(L10n.text(.sessionStarted, language: settings.appLanguage))")
         case .streamDelta(let agent, let delta):
             moods[agent] = .speaking
             expand()

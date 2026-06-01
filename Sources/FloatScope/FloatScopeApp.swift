@@ -91,7 +91,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(NSMenuItem(title: "Reset Position", action: #selector(resetPosition), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Conversation History...", action: #selector(openHistory), keyEquivalent: "h"))
         menu.addItem(NSMenuItem(title: "New Conversation", action: #selector(newConversation), keyEquivalent: "n"))
-        menu.addItem(NSMenuItem(title: "Toggle Screen Watch", action: #selector(toggleScreenWatch), keyEquivalent: "w"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
@@ -130,12 +129,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         model?.startNewConversation()
-    }
-
-    @objc private func toggleScreenWatch() {
-        panel?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        model?.toggleScreenWatch()
     }
 
     @objc private func resetPosition() {

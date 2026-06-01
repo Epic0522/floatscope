@@ -78,13 +78,13 @@ final class AgentBridge: @unchecked Sendable {
         attachments: [URL] = [],
         codexModelPreset: CodexModelPreset,
         codexEffortPreset: ReasoningEffortPreset,
-        agent2ModelPreset: OpenCodeModelPreset,
-        agent2VariantPreset: OpenCodeVariantPreset
+        secondaryModelPreset: OpenCodeModelPreset,
+        secondaryVariantPreset: OpenCodeVariantPreset
     ) {
         if agent == codex?.agentID {
             codex?.send(message: message, attachments: attachments, modelPreset: codexModelPreset, effortPreset: codexEffortPreset)
         } else if agent == opencode?.agentID {
-            opencode?.send(message: message, attachments: attachments, modelPreset: agent2ModelPreset, variantPreset: agent2VariantPreset)
+            opencode?.send(message: message, attachments: attachments, modelPreset: secondaryModelPreset, variantPreset: secondaryVariantPreset)
         } else {
             genericSessions[agent]?.send(message: message, attachments: attachments)
         }
@@ -96,11 +96,16 @@ final class AgentBridge: @unchecked Sendable {
         genericSessions.values.forEach { $0.stop() }
     }
 
-    func startNewConversation() {
-        ConversationContext.resetActiveTitle()
+    func startNewConversation(group: Bool = false) {
+        ConversationContext.resetActiveTitle(prefix: group ? "群聊 " : nil)
         codex?.resetConversation()
         opencode?.resetConversation()
         genericSessions.values.forEach { $0.resetConversation() }
+    }
+
+    func prepareGroupConversationIfNeeded() {
+        guard ConversationContext.activeTitle?.hasPrefix("群聊 ") != true else { return }
+        startNewConversation(group: true)
     }
 
     func selectConversation(_ entry: ConversationHistoryEntry) {
@@ -145,16 +150,20 @@ private struct ConversationContext: Sendable {
         UserDefaults.standard.set(title, forKey: NativeSessionKeys.activeConversationTitle)
     }
 
-    static func resetActiveTitle() {
-        UserDefaults.standard.set(makeTimestampTitle(), forKey: NativeSessionKeys.activeConversationTitle)
+    static var activeTitle: String? {
+        UserDefaults.standard.string(forKey: NativeSessionKeys.activeConversationTitle)
     }
 
-    private static func makeTimestampTitle() -> String {
+    static func resetActiveTitle(prefix: String? = nil) {
+        UserDefaults.standard.set(makeTimestampTitle(prefix: prefix), forKey: NativeSessionKeys.activeConversationTitle)
+    }
+
+    private static func makeTimestampTitle(prefix: String? = nil) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        return formatter.string(from: Date())
+        return (prefix ?? "") + formatter.string(from: Date())
     }
 }
 
@@ -215,6 +224,8 @@ private final class CodexAppServerSession: @unchecked Sendable {
     private var isStopping = false
     private var modelPreset: CodexModelPreset = .gpt55
     private var effortPreset: ReasoningEffortPreset = .medium
+    private var activeTurnToken = 0
+    private var awaitingFirstTurnOutput = false
     private let queue = DispatchQueue(label: "FloatScope.CodexAppServerSession")
 
     init(agentID: String, executablePath: String, context: ConversationContext) {
@@ -251,7 +262,6 @@ private final class CodexAppServerSession: @unchecked Sendable {
                 guard let self else { return }
                 switch result {
                 case .success(let threadID):
-                    self.onEvent?(.completed(agentID))
                     self.turnStartLocked(threadID: threadID, message: message, attachments: attachments)
                 case .failure(let error):
                     self.onEvent?(.failed(agentID, error.localizedDescription))
@@ -438,6 +448,10 @@ private final class CodexAppServerSession: @unchecked Sendable {
     }
 
     private func turnStartLocked(threadID: String, message: String, attachments: [URL]) {
+        activeTurnToken += 1
+        let turnToken = activeTurnToken
+        awaitingFirstTurnOutput = true
+
         var input: [[String: Any]] = [
             [
                 "type": "text",
@@ -468,9 +482,26 @@ private final class CodexAppServerSession: @unchecked Sendable {
             "effort": effortPreset.rawValue,
             "input": input
         ]) { [weak self] result in
-            if case .failure(let error) = result {
-                self?.onEvent?(.failed(self?.agentID ?? "agent1", error.localizedDescription))
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.scheduleTurnStartWatchdogLocked(token: turnToken)
+            case .failure(let error):
+                self.awaitingFirstTurnOutput = false
+                self.onEvent?(.failed(self.agentID, error.localizedDescription))
             }
+        }
+    }
+
+    private func scheduleTurnStartWatchdogLocked(token: Int) {
+        queue.asyncAfter(deadline: .now() + 90) { [weak self] in
+            guard let self,
+                  self.activeTurnToken == token,
+                  self.awaitingFirstTurnOutput else {
+                return
+            }
+            self.awaitingFirstTurnOutput = false
+            self.onEvent?(.failed(self.agentID, "Codex accepted the message but did not start a reply. Try sending again or start a new conversation."))
         }
     }
 
@@ -540,15 +571,18 @@ private final class CodexAppServerSession: @unchecked Sendable {
             }
         case "item/agentMessage/delta":
             if let delta = params["delta"] as? String {
+                awaitingFirstTurnOutput = false
                 onEvent?(.streamDelta(agentID, delta))
             }
         case "turn/completed":
+            awaitingFirstTurnOutput = false
             if let threadID {
                 CodexHistoryVisibilityRegistrar.register(threadID: threadID, workspaceRoot: context.rootPath)
                 CodexHistoryVisibilityRegistrar.registerSoon(threadID: threadID, workspaceRoot: context.rootPath)
             }
             onEvent?(.completed(agentID))
         case "error":
+            awaitingFirstTurnOutput = false
             onEvent?(.failed(agentID, params["message"] as? String ?? "Codex app-server error"))
         default:
             break

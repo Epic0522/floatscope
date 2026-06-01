@@ -264,10 +264,24 @@ private struct CapsuleBar: View {
     }
 
     private var activeMood: AgentMoodState {
-        if model.selectedAgentID == "auto" {
+        if isGroupSelected {
+            if !model.pendingResponseAgents.isEmpty {
+                let pendingMoods = model.pendingResponseAgents.map { model.moods[$0] ?? .thinking }
+                if pendingMoods.contains(.speaking) { return .speaking }
+                if pendingMoods.contains(.watching) { return .watching }
+                return .thinking
+            }
             return model.moods.values.first(where: { $0 != .idle }) ?? .idle
         }
-        return model.moods[model.selectedAgentID] ?? .idle
+        let mood = model.moods[model.selectedAgentID] ?? .idle
+        if model.pendingResponseAgents.contains(model.selectedAgentID), mood == .idle {
+            return .thinking
+        }
+        return mood
+    }
+
+    private var isGroupSelected: Bool {
+        model.selectedAgentID == "group" || model.selectedAgentID == "auto"
     }
 
     private var draftPreview: String {
@@ -295,19 +309,19 @@ private struct AgentPickerMenu: View {
         }
         .buttonStyle(.plain)
         .frame(width: 22, height: 22)
-        .help("选择人格")
+        .help("选择聊天对象")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 2) {
                 Button {
-                    model.selectedAgentID = "auto"
-                    UserDefaults.standard.set("auto", forKey: SettingsKeys.selectedAgentID)
+                    model.selectedAgentID = "group"
+                    UserDefaults.standard.set("group", forKey: SettingsKeys.selectedAgentID)
                     isPresented = false
                 } label: {
                     HStack(spacing: 8) {
                         autoDots
-                        Text("Auto")
+                        Text("Group")
                         Spacer()
-                        if model.selectedAgentID == "auto" {
+                        if isGroupSelected {
                             Image(systemName: "checkmark")
                         }
                     }
@@ -344,7 +358,7 @@ private struct AgentPickerMenu: View {
 
     @ViewBuilder
     private func agentSymbol(pulse: Double) -> some View {
-        if model.selectedAgentID == "auto" {
+        if isGroupSelected {
             autoDots
                 .scaleEffect(pulseScale(pulse))
                 .opacity(pulseOpacity(pulse))
@@ -360,6 +374,10 @@ private struct AgentPickerMenu: View {
                     Circle().stroke(.white.opacity(0.32), lineWidth: 0.8)
                 }
         }
+    }
+
+    private var isGroupSelected: Bool {
+        model.selectedAgentID == "group" || model.selectedAgentID == "auto"
     }
 
     @ViewBuilder
@@ -644,7 +662,14 @@ private struct ConversationPanel: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(model.messages.suffix(24)) { message in
-                            MessageBubble(message: message, visuals: model.settings.visuals, agents: model.agentConfigs)
+                            MessageBubble(
+                                message: message,
+                                visuals: model.settings.visuals,
+                                agents: model.agentConfigs,
+                                onEditForResend: {
+                                    model.editMessageForResend(message)
+                                }
+                            )
                                 .id(message.id)
                         }
                         Color.clear
@@ -690,6 +715,7 @@ private struct MessageBubble: View {
     let message: ChatMessage
     let visuals: AgentVisualConfig
     let agents: [AgentRuntimeConfig]
+    let onEditForResend: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -708,6 +734,15 @@ private struct MessageBubble: View {
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contextMenu {
+            if isUserMessage {
+                Button {
+                    onEditForResend()
+                } label: {
+                    Label("重新编辑并发送", systemImage: "pencil")
+                }
+            }
+        }
     }
 
     private var background: Color {
@@ -719,6 +754,11 @@ private struct MessageBubble: View {
         case .agent(let agent):
             Color(hex: agents.first(where: { $0.id == agent })?.color ?? "#8E8E93").opacity(0.22)
         }
+    }
+
+    private var isUserMessage: Bool {
+        if case .user = message.role { return true }
+        return false
     }
 }
 
@@ -790,43 +830,94 @@ private struct ModelPickerMenu: View {
         .frame(width: 22, height: 22)
         .help("选择当前人格使用的模型")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                if model.selectedAgentID == model.agentConfigs.first?.id {
-                    codexSection
-                } else if model.selectedAgentID == model.agentConfigs.dropFirst().first?.id {
-                    agent2Sections
-                } else if model.selectedAgentID == "auto" {
-                    ForEach(model.agentConfigs.prefix(2)) { agent in
-                        Text(agent.displayName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 10)
-                        if agent.id == model.agentConfigs.first?.id {
-                            codexSection
-                        } else {
-                            agent2Sections
-                        }
-                    }
-                } else if let agent = model.agentConfigs.first(where: { $0.id == model.selectedAgentID }) {
-                    Text(agent.displayName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10)
-                    Text(agent.model ?? "Configured in Settings")
-                        .font(.caption)
-                        .padding(.horizontal, 10)
-                    Text(agent.effort ?? agent.variant ?? "")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10)
-                } else {
-                    Text("Configured in Settings")
-                        .padding(.horizontal, 10)
-                }
-            }
-            .padding(.vertical, 10)
-            .frame(width: 260)
+            modelPickerContent
+                .padding(10)
         }
+    }
+
+    @ViewBuilder
+    private var modelPickerContent: some View {
+        if model.selectedAgentID == model.agentConfigs.first?.id {
+            ScrollView {
+                agentColumn(agent: model.agentConfigs.first, kind: .codex)
+            }
+            .frame(width: 250, height: 360)
+        } else if model.selectedAgentID == model.agentConfigs.dropFirst().first?.id {
+            ScrollView {
+                agentColumn(agent: model.agentConfigs.dropFirst().first, kind: .opencode)
+            }
+            .frame(width: 270, height: 430)
+        } else if model.selectedAgentID == "group" || model.selectedAgentID == "auto" {
+            HStack(alignment: .top, spacing: 12) {
+                ScrollView {
+                    agentColumn(agent: model.agentConfigs.first, kind: .codex)
+                }
+                .frame(width: 230, height: 430)
+
+                Divider()
+                    .frame(height: 430)
+
+                ScrollView {
+                    agentColumn(agent: model.agentConfigs.dropFirst().first, kind: .opencode)
+                }
+                .frame(width: 260, height: 430)
+            }
+        } else if let agent = model.agentConfigs.first(where: { $0.id == model.selectedAgentID }) {
+            ScrollView {
+                genericAgentColumn(agent: agent)
+            }
+            .frame(width: 250, height: 220)
+        } else {
+            Text("Configured in Settings")
+                .padding(.horizontal, 10)
+        }
+    }
+
+    private enum ModelColumnKind {
+        case codex
+        case opencode
+    }
+
+    @ViewBuilder
+    private func agentColumn(agent: AgentRuntimeConfig?, kind: ModelColumnKind) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            agentHeader(agent)
+            switch kind {
+            case .codex:
+                codexSection
+            case .opencode:
+                secondarySections
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func agentHeader(_ agent: AgentRuntimeConfig?) -> some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(Color(hex: agent?.color ?? "#8E8E93"))
+                .frame(width: 9, height: 9)
+            Text(agent?.displayName ?? "Agent")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 2)
+    }
+
+    private func genericAgentColumn(agent: AgentRuntimeConfig) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            agentHeader(agent)
+            Text(agent.model ?? "Configured in Settings")
+                .font(.caption)
+                .padding(.horizontal, 10)
+            Text(agent.effort ?? agent.variant ?? "")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -856,17 +947,17 @@ private struct ModelPickerMenu: View {
     }
 
     @ViewBuilder
-    private var agent2Sections: some View {
+    private var secondarySections: some View {
         Text("OpenCode Zen")
             .font(.caption)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
         ForEach(OpenCodeModelPreset.opencodeZenCases) { preset in
             Button {
-                model.setAgent2ModelPreset(preset)
+                model.setSecondaryModelPreset(preset)
                 isPresented = false
             } label: {
-                modelRow(title: preset.displayName, selected: preset == model.agent2ModelPreset)
+                modelRow(title: preset.displayName, selected: preset == model.secondaryModelPreset)
             }
             .buttonStyle(.plain)
         }
@@ -877,9 +968,9 @@ private struct ModelPickerMenu: View {
             .padding(.horizontal, 10)
         ForEach(OpenCodeModelPreset.googleCases) { preset in
             Button {
-                model.setAgent2ModelPreset(preset)
+                model.setSecondaryModelPreset(preset)
             } label: {
-                modelRow(title: preset.displayName, selected: preset == model.agent2ModelPreset)
+                modelRow(title: preset.displayName, selected: preset == model.secondaryModelPreset)
             }
             .buttonStyle(.plain)
         }
@@ -890,9 +981,9 @@ private struct ModelPickerMenu: View {
             .padding(.horizontal, 10)
         ForEach(OpenCodeModelPreset.openRouterCases) { preset in
             Button {
-                model.setAgent2ModelPreset(preset)
+                model.setSecondaryModelPreset(preset)
             } label: {
-                modelRow(title: preset.displayName, selected: preset == model.agent2ModelPreset)
+                modelRow(title: preset.displayName, selected: preset == model.secondaryModelPreset)
             }
             .buttonStyle(.plain)
         }
@@ -903,10 +994,10 @@ private struct ModelPickerMenu: View {
             .padding(.horizontal, 10)
         ForEach(OpenCodeVariantPreset.allCases) { preset in
             Button {
-                model.setAgent2VariantPreset(preset)
+                model.setSecondaryVariantPreset(preset)
                 isPresented = false
             } label: {
-                modelRow(title: preset.displayName, selected: preset == model.agent2VariantPreset)
+                modelRow(title: preset.displayName, selected: preset == model.secondaryVariantPreset)
             }
             .buttonStyle(.plain)
         }
@@ -923,6 +1014,7 @@ private struct ModelPickerMenu: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 
@@ -962,6 +1054,13 @@ private struct HistoryPickerView: View {
                                 HistoryRow(entry: entry, agents: model.agentConfigs)
                             }
                             .buttonStyle(.plain)
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    model.deleteHistory(entry)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
                         }
                     }
                     .padding(.vertical, 2)
@@ -989,14 +1088,7 @@ private struct HistoryRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            VStack(spacing: 4) {
-                if entry.codexThreadID != nil {
-                    Circle().fill(Color(hex: agents.first?.color ?? "#FF6FB7")).frame(width: 9, height: 9)
-                }
-                if entry.opencodeSessionID != nil {
-                    Circle().fill(Color(hex: agents.dropFirst().first?.color ?? "#A85BFF")).frame(width: 9, height: 9)
-                }
-            }
+            historyIcon
             .frame(width: 14)
             .padding(.top, 4)
 
@@ -1026,11 +1118,91 @@ private struct HistoryRow: View {
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
+    @ViewBuilder
+    private var historyIcon: some View {
+        if entry.title.hasPrefix("群聊 ") || entry.agentCount > 1 {
+            GroupHistoryIcon(colors: groupColors, hasMore: groupColors.count > 3)
+        } else if entry.codexThreadID != nil {
+            Image(systemName: "bubble.left.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Color(hex: agents.first?.color ?? "#FF6FB7"))
+        } else if entry.opencodeSessionID != nil {
+            Image(systemName: "bubble.left.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Color(hex: agents.dropFirst().first?.color ?? "#A85BFF"))
+        } else {
+            Image(systemName: "bubble.left")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var groupColors: [Color] {
+        var colors: [Color] = []
+        if entry.codexThreadID != nil || entry.title.hasPrefix("群聊 ") {
+            if let color = agents.first?.color {
+                colors.append(Color(hex: color))
+            }
+        }
+        if entry.opencodeSessionID != nil || entry.title.hasPrefix("群聊 ") {
+            if let color = agents.dropFirst().first?.color {
+                colors.append(Color(hex: color))
+            }
+        }
+        if entry.title.hasPrefix("群聊 "), agents.count > 2 {
+            colors.append(contentsOf: agents.dropFirst(2).map { Color(hex: $0.color) })
+        }
+        return colors.isEmpty ? [.secondary] : colors
+    }
+
     private func shortDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter.string(from: date)
+    }
+}
+
+private struct GroupHistoryIcon: View {
+    let colors: [Color]
+    let hasMore: Bool
+
+    var body: some View {
+        ZStack {
+            ForEach(Array(colors.prefix(3).enumerated()), id: \.offset) { index, color in
+                Circle()
+                    .fill(color)
+                    .frame(width: 8.5, height: 8.5)
+                    .offset(offset(for: index, count: min(colors.count, 3)))
+                    .overlay {
+                        Circle().stroke(.white.opacity(0.45), lineWidth: 0.7)
+                    }
+            }
+
+            if hasMore {
+                Text("+")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 9, height: 9)
+                    .background(.secondary, in: Circle())
+                    .offset(x: 5, y: 5)
+            }
+        }
+        .frame(width: 16, height: 16)
+    }
+
+    private func offset(for index: Int, count: Int) -> CGSize {
+        if count <= 1 {
+            return .zero
+        }
+        if count == 2 {
+            return index == 0 ? CGSize(width: -3, height: -2) : CGSize(width: 3, height: 3)
+        }
+        switch index {
+        case 0: return CGSize(width: -4, height: -3)
+        case 1: return CGSize(width: 4, height: -3)
+        default: return CGSize(width: 0, height: 4)
+        }
     }
 }
 
@@ -1227,7 +1399,7 @@ private struct SettingsView: View {
                     model.setCodexEffortPreset(value)
                 }
 
-                Picker("Agent 2 Model", selection: $model.agent2ModelPreset) {
+                Picker("Agent 2 Model", selection: $model.secondaryModelPreset) {
                     Section("OpenCode Zen") {
                         ForEach(OpenCodeModelPreset.opencodeZenCases) { preset in
                             Text(preset.displayName).tag(preset)
@@ -1244,17 +1416,17 @@ private struct SettingsView: View {
                         }
                     }
                 }
-                .onChange(of: model.agent2ModelPreset) { _, value in
-                    model.setAgent2ModelPreset(value)
+                .onChange(of: model.secondaryModelPreset) { _, value in
+                    model.setSecondaryModelPreset(value)
                 }
 
-                Picker("Agent 2 Variant", selection: $model.agent2VariantPreset) {
+                Picker("Agent 2 Variant", selection: $model.secondaryVariantPreset) {
                     ForEach(OpenCodeVariantPreset.allCases) { preset in
                         Text(preset.displayName).tag(preset)
                     }
                 }
-                .onChange(of: model.agent2VariantPreset) { _, value in
-                    model.setAgent2VariantPreset(value)
+                .onChange(of: model.secondaryVariantPreset) { _, value in
+                    model.setSecondaryVariantPreset(value)
                 }
 
                 settingsTextField("Conversation Project", text: Binding(

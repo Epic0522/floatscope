@@ -1,7 +1,7 @@
 import Foundation
 
 struct ConversationHistoryEntry: Identifiable, Hashable, Sendable {
-    let id: String
+    var id: String
     var title: String
     var codexThreadID: String?
     var opencodeSessionID: String?
@@ -22,22 +22,67 @@ enum ConversationHistoryStore {
 
     static func list(conversationRoot: String, agents: [AgentRuntimeConfig]) -> [ConversationHistoryEntry] {
         let root = normalized(conversationRoot)
-        return (
+        let entries = (
             codexEntries(conversationRoot: root, agentID: agents.first?.id ?? "agent1")
                 + opencodeEntries(conversationRoot: root, agentID: agents.dropFirst().first?.id ?? "agent2")
         )
+        return mergeGroupEntries(entries)
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
     static func loadMessages(for entry: ConversationHistoryEntry, agents: [AgentRuntimeConfig]) -> [ChatMessage] {
         var messages: [ChatMessage] = []
-        if let threadID = entry.codexThreadID {
+        let codexThreadID = entry.codexThreadID ?? (entry.title.hasPrefix("群聊 ") ? codexThreadID(title: entry.title) : nil)
+        let opencodeSessionID = entry.opencodeSessionID ?? (entry.title.hasPrefix("群聊 ") ? opencodeSessionID(title: entry.title) : nil)
+
+        if let threadID = codexThreadID {
             messages += codexMessages(threadID: threadID, agentID: agents.first?.id ?? "agent1")
         }
-        if let sessionID = entry.opencodeSessionID {
+        if let sessionID = opencodeSessionID {
             messages += opencodeMessages(sessionID: sessionID, agentID: agents.dropFirst().first?.id ?? "agent2")
         }
         return dedupe(messages.sorted { $0.createdAt < $1.createdAt })
+    }
+
+    static func delete(_ entry: ConversationHistoryEntry) {
+        if let threadID = entry.codexThreadID {
+            hideCodexThread(threadID)
+        }
+        if let sessionID = entry.opencodeSessionID {
+            hideOpenCodeSession(sessionID)
+        }
+    }
+
+    private static func mergeGroupEntries(_ entries: [ConversationHistoryEntry]) -> [ConversationHistoryEntry] {
+        var result: [ConversationHistoryEntry] = []
+        var groups: [String: ConversationHistoryEntry] = [:]
+
+        for entry in entries {
+            guard entry.title.hasPrefix("群聊 ") else {
+                result.append(entry)
+                continue
+            }
+
+            if var existing = groups[entry.title] {
+                let previousUpdatedAt = existing.updatedAt
+                existing.codexThreadID = existing.codexThreadID ?? entry.codexThreadID
+                existing.opencodeSessionID = existing.opencodeSessionID ?? entry.opencodeSessionID
+                existing.updatedAt = max(existing.updatedAt, entry.updatedAt)
+                existing.messageCount += entry.messageCount
+                if entry.updatedAt >= previousUpdatedAt || existing.preview.isEmpty {
+                    existing.preview = entry.preview
+                }
+                existing.id = "group:\(entry.title)"
+                groups[entry.title] = existing
+            } else {
+                var grouped = entry
+                grouped.id = "group:\(entry.title)"
+                groups[entry.title] = grouped
+            }
+        }
+
+        result.append(contentsOf: groups.values)
+        return result
     }
 
     private static func codexEntries(conversationRoot: String, agentID: String) -> [ConversationHistoryEntry] {
@@ -48,8 +93,8 @@ enum ConversationHistoryStore {
                 return nil
             }
             let title = index[meta.id]?.title ?? timestampTitle(from: meta.timestamp) ?? meta.id
-            let updatedAt = index[meta.id]?.updatedAt ?? meta.timestamp
             let messages = codexMessages(from: url, agentID: agentID)
+            let updatedAt = messages.last?.createdAt ?? index[meta.id]?.updatedAt ?? meta.timestamp
             return ConversationHistoryEntry(
                 id: "codex:\(meta.id)",
                 title: title,
@@ -57,7 +102,7 @@ enum ConversationHistoryStore {
                 opencodeSessionID: nil,
                 updatedAt: updatedAt,
                 messageCount: messages.count,
-                preview: messages.last?.text ?? ""
+                preview: messages.last.map { previewText(for: $0) } ?? ""
             )
         }
     }
@@ -88,6 +133,24 @@ enum ConversationHistoryStore {
                 preview: preview
             )
         }
+    }
+
+    private static func codexThreadID(title: String) -> String? {
+        codexIndex()
+            .filter { $0.value.title == title }
+            .max { $0.value.updatedAt < $1.value.updatedAt }?
+            .key
+    }
+
+    private static func opencodeSessionID(title: String) -> String? {
+        let sql = """
+        select id
+        from session
+        where title = '\(escapeSQL(title))'
+        order by time_updated desc
+        limit 1;
+        """
+        return runSQLiteJSON(sql).first?["id"] as? String
     }
 
     private static func codexMessages(threadID: String, agentID: String) -> [ChatMessage] {
@@ -198,7 +261,7 @@ enum ConversationHistoryStore {
             let text = item.texts.joined(separator: "\n\n")
             guard !text.isEmpty || !item.attachments.isEmpty else { return nil }
             if item.role == "user" {
-                return ChatMessage(role: .user, text: text, attachments: item.attachments, createdAt: item.createdAt)
+                return ChatMessage(role: .user, text: visibleUserText(from: text), attachments: item.attachments, createdAt: item.createdAt)
             }
             if item.role == "assistant" {
                 return ChatMessage(role: .agent(agentID), text: text, attachments: item.attachments, createdAt: item.createdAt)
@@ -218,7 +281,7 @@ enum ConversationHistoryStore {
         order by p.time_created desc
         limit 1;
         """
-        return runSQLiteJSON(sql).first?["text"] as? String
+        return (runSQLiteJSON(sql).first?["text"] as? String).map(visibleUserText)
     }
 
     private static func extractCodexContent(from payload: [String: Any], role: String) -> ParsedContent {
@@ -241,9 +304,58 @@ enum ConversationHistoryStore {
             if role == "user", shouldHideCodexInput(text) {
                 return nil
             }
-            return text.isEmpty ? nil : text
+            let visibleText = role == "user" ? visibleUserText(from: text) : text
+            return visibleText.isEmpty ? nil : visibleText
         }
         return ParsedContent(text: pieces.joined(separator: "\n\n"), attachments: attachments)
+    }
+
+    private static func visibleUserText(from text: String) -> String {
+        unquoteTransportWrapper(stripGroupContext(from: text))
+    }
+
+    private static func previewText(for message: ChatMessage) -> String {
+        switch message.role {
+        case .user:
+            return visibleUserText(from: message.text)
+        default:
+            return stripGroupContext(from: message.text)
+        }
+    }
+
+    private static func stripGroupContext(from text: String) -> String {
+        text
+            .replacingOccurrences(
+                of: #"(?s)\n?\s*---\s*\n\[Group context\].*?\[/Group context\]\s*"#,
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?s)\n?\s*<!--\s*FloatScope group context.*?-->\s*"#,
+                with: "",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func unquoteTransportWrapper(_ text: String) -> String {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else { return trimmed }
+
+        let pairs: [(Character, Character)] = [
+            ("\"", "\""),
+            ("“", "”"),
+            ("「", "」"),
+            ("『", "』")
+        ]
+
+        for (open, close) in pairs where trimmed.first == open && trimmed.last == close {
+            trimmed.removeFirst()
+            trimmed.removeLast()
+            return trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return trimmed
     }
 
     private static func shouldHideCodexInput(_ text: String) -> Bool {
@@ -303,6 +415,101 @@ enum ConversationHistoryStore {
         }
     }
 
+    private static func hideCodexThread(_ threadID: String) {
+        for url in codexSessionFiles() where url.lastPathComponent.contains(threadID) {
+            if let meta = codexMetaLine(from: url) {
+                try? (meta + "\n").write(to: url, atomically: true, encoding: .utf8)
+            } else {
+                try? "".write(to: url, atomically: true, encoding: .utf8)
+            }
+        }
+
+        let indexURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex")
+            .appendingPathComponent("session_index.jsonl")
+        guard let raw = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
+        let kept = raw
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { line in
+                guard let data = line.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let id = object["id"] as? String else {
+                    return true
+                }
+                return id != threadID
+            }
+            .joined(separator: "\n")
+        try? (kept + (kept.hasSuffix("\n") ? "" : "\n")).write(to: indexURL, atomically: true, encoding: .utf8)
+        hideCodexThreadInGlobalState(threadID)
+        archiveCodexThreadInSQLite(threadID)
+    }
+
+    private static func hideOpenCodeSession(_ sessionID: String) {
+        let escaped = escapeSQL(sessionID)
+        runSQLiteExec("""
+        delete from part where session_id = '\(escaped)';
+        delete from message where session_id = '\(escaped)';
+        update session
+        set title = '[hidden]', directory = ''
+        where id = '\(escaped)';
+        """)
+    }
+
+    private static func codexMetaLine(from url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        return String(data: handle.availableData.prefix(120_000), encoding: .utf8)?
+            .split(separator: "\n")
+            .first { line in
+                guard let data = line.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    return false
+                }
+                return object["type"] as? String == "session_meta"
+            }
+            .map(String.init)
+    }
+
+    private static func hideCodexThreadInGlobalState(_ threadID: String) {
+        let stateURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex")
+            .appendingPathComponent(".codex-global-state.json")
+        guard let data = try? Data(contentsOf: stateURL),
+              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+
+        for key in ["thread-workspace-root-hints", "workspace-thread-root-hints"] {
+            var hints = root[key] as? [String: Any] ?? [:]
+            hints.removeValue(forKey: threadID)
+            root[key] = hints
+        }
+        for key in ["projectless-thread-ids", "pinned-thread-ids", "recent-thread-ids"] {
+            var ids = root[key] as? [String] ?? []
+            ids.removeAll { $0 == threadID }
+            root[key] = ids
+        }
+
+        guard let updated = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? updated.write(to: stateURL, options: [.atomic])
+    }
+
+    private static func archiveCodexThreadInSQLite(_ threadID: String) {
+        let dbURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex")
+            .appendingPathComponent("state_5.sqlite")
+        guard FileManager.default.fileExists(atPath: dbURL.path) else { return }
+
+        let escaped = escapeSQL(threadID)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [dbURL.path, "update threads set archived = 1, archived_at = strftime('%s','now'), preview = '', first_user_message = '' where id = '\(escaped)';"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+    }
+
     private static func runSQLiteJSON(_ sql: String) -> [[String: Any]] {
         let dbURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local")
@@ -326,6 +533,23 @@ enum ConversationHistoryStore {
         guard process.terminationStatus == 0 else { return [] }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+    }
+
+    private static func runSQLiteExec(_ sql: String) {
+        let dbURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local")
+            .appendingPathComponent("share")
+            .appendingPathComponent("opencode")
+            .appendingPathComponent("opencode.db")
+        guard FileManager.default.fileExists(atPath: dbURL.path) else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [dbURL.path, sql]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
     }
 
     private static func attachment(fromOpenCodeFile object: [String: Any], fallbackName: String, remainingDataURLAttachments: inout Int) -> ChatAttachment? {
@@ -399,13 +623,19 @@ enum ConversationHistoryStore {
             if case .user = message.role,
                let previous = result.last,
                case .user = previous.role,
-               previous.text == message.text,
+               normalizedUserText(previous.text) == normalizedUserText(message.text),
                abs(previous.createdAt.timeIntervalSince(message.createdAt)) < 10 {
                 continue
             }
             result.append(message)
         }
         return Array(result.suffix(80))
+    }
+
+    private static func normalizedUserText(_ text: String) -> String {
+        visibleUserText(from: text)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func timestampTitle(from date: Date) -> String? {

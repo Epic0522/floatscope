@@ -16,13 +16,14 @@ final class FloatScopeModel: ObservableObject {
     @Published var settings = FloatScopeSettings()
     @Published var codexModelPreset: CodexModelPreset
     @Published var codexEffortPreset: ReasoningEffortPreset
-    @Published var agent2ModelPreset: OpenCodeModelPreset
-    @Published var agent2VariantPreset: OpenCodeVariantPreset
+    @Published var secondaryModelPreset: OpenCodeModelPreset
+    @Published var secondaryVariantPreset: OpenCodeVariantPreset
     @Published var pendingAttachments: [URL] = []
     @Published var agentConfigs: [AgentRuntimeConfig]
     @Published var showHistory = false
     @Published var historyEntries: [ConversationHistoryEntry] = []
     @Published var isLoadingHistory = false
+    @Published var pendingResponseAgents: Set<String> = []
     var onExpansionChanged: ((Bool) -> Void)?
 
     private let bridge = AgentBridge()
@@ -39,10 +40,14 @@ final class FloatScopeModel: ObservableObject {
         let storedSettings = FloatScopeSettings()
         codexModelPreset = storedSettings.codexModelPreset
         codexEffortPreset = storedSettings.codexEffortPreset
-        agent2ModelPreset = storedSettings.agent2ModelPreset
-        agent2VariantPreset = storedSettings.agent2VariantPreset
+        secondaryModelPreset = storedSettings.secondaryModelPreset
+        secondaryVariantPreset = storedSettings.secondaryVariantPreset
         agentConfigs = AgentHubConfigStore.load().agents
-        if !agentConfigs.contains(where: { $0.id == selectedAgentID }) && selectedAgentID != "auto" {
+        if selectedAgentID == "auto" {
+            selectedAgentID = "group"
+            UserDefaults.standard.set(selectedAgentID, forKey: SettingsKeys.selectedAgentID)
+        }
+        if !agentConfigs.contains(where: { $0.id == selectedAgentID }) && !isGroupAgentID(selectedAgentID) {
             selectedAgentID = agentConfigs.first?.id ?? "agent1"
         }
         messages = TranscriptStore.load()
@@ -83,31 +88,33 @@ final class FloatScopeModel: ObservableObject {
             return
         }
 
-        let agent = resolveAgentID(for: trimmed)
+        let agents = resolveAgentIDs(for: trimmed)
+        guard !agents.isEmpty else { return }
         let message = trimmed.isEmpty ? "请看这些附件。" : trimmed
+        if isGroupAgentID(selectedAgentID), agents.count > 1 {
+            bridge.prepareGroupConversationIfNeeded()
+        }
         appendUser(message, attachments: attachments)
-        currentAgentResponse[agent] = nil
-        moods[agent] = .thinking
-        bridge.send(agent: agent, message: message, attachments: attachments, codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, agent2ModelPreset: agent2ModelPreset, agent2VariantPreset: agent2VariantPreset)
+        pendingResponseAgents.formUnion(agents)
+        for agent in agents {
+            currentAgentResponse[agent] = nil
+            moods[agent] = .thinking
+            bridge.send(agent: agent, message: outboundMessage(message, groupAgents: agents), attachments: attachments, codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
+        }
+    }
+
+    func editMessageForResend(_ message: ChatMessage) {
+        guard case .user = message.role else { return }
+        inputText = message.text
+        pendingAttachments = message.attachments
+            .map(\.url)
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        showLongInputEditor = needsLongInputEditor
+        expand()
     }
 
     func manualScreenCapture() {
         sendWithFreshScreenCapture(prompt: "你看这个")
-    }
-
-    func toggleScreenWatch() {
-        if watchMode != nil {
-            scheduler?.stop()
-            watchMode = nil
-            resetMoodMap()
-            appendSystem("Screen watch stopped.")
-            return
-        }
-
-        let mode = WatchIntervalMode.fixed(settings.watchDefaultInterval)
-        watchMode = mode
-        scheduler?.start(intervalMode: mode)
-        appendSystem("Screen watch started.")
     }
 
     func addAttachments() {
@@ -199,8 +206,8 @@ final class FloatScopeModel: ObservableObject {
         bridge.startAll()
         settings.codexModelPreset = codexModelPreset
         settings.codexEffortPreset = codexEffortPreset
-        settings.agent2ModelPreset = agent2ModelPreset
-        settings.agent2VariantPreset = agent2VariantPreset
+        settings.secondaryModelPreset = secondaryModelPreset
+        settings.secondaryVariantPreset = secondaryVariantPreset
         screenWatcher.setRollingCacheEnabled(settings.screenReplayCacheEnabled)
         UserDefaults.standard.set(selectedAgent.rawValue, forKey: SettingsKeys.selectedAgent)
         UserDefaults.standard.set(selectedAgentID, forKey: SettingsKeys.selectedAgentID)
@@ -240,21 +247,22 @@ final class FloatScopeModel: ObservableObject {
         updateAgentConfig(id: agentConfigs.first?.id, model: nil, effort: preset.rawValue, variant: nil)
     }
 
-    func setAgent2ModelPreset(_ preset: OpenCodeModelPreset) {
-        agent2ModelPreset = preset
-        settings.agent2ModelPreset = preset
+    func setSecondaryModelPreset(_ preset: OpenCodeModelPreset) {
+        secondaryModelPreset = preset
+        settings.secondaryModelPreset = preset
         updateAgentConfig(id: agentConfigs.dropFirst().first?.id, model: preset.modelIdentifier, effort: nil, variant: nil)
     }
 
-    func setAgent2VariantPreset(_ preset: OpenCodeVariantPreset) {
-        agent2VariantPreset = preset
-        settings.agent2VariantPreset = preset
+    func setSecondaryVariantPreset(_ preset: OpenCodeVariantPreset) {
+        secondaryVariantPreset = preset
+        settings.secondaryVariantPreset = preset
         updateAgentConfig(id: agentConfigs.dropFirst().first?.id, model: nil, effort: nil, variant: preset.rawValue)
     }
 
     func startNewConversation() {
-        bridge.startNewConversation()
+        bridge.startNewConversation(group: isGroupAgentID(selectedAgentID))
         currentAgentResponse.removeAll()
+        pendingResponseAgents.removeAll()
         messages.removeAll()
         TranscriptStore.clear()
         appendSystem("Started a new FloatScope conversation.")
@@ -283,7 +291,10 @@ final class FloatScopeModel: ObservableObject {
         bridge.selectConversation(entry)
         currentAgentResponse.removeAll()
         let agents = agentConfigs
-        if entry.codexThreadID != nil, entry.opencodeSessionID == nil {
+        if entry.title.hasPrefix("群聊 ") || (entry.codexThreadID != nil && entry.opencodeSessionID != nil) {
+            selectedAgentID = "group"
+            UserDefaults.standard.set(selectedAgentID, forKey: SettingsKeys.selectedAgentID)
+        } else if entry.codexThreadID != nil, entry.opencodeSessionID == nil {
             selectedAgentID = agents.first?.id ?? selectedAgentID
             UserDefaults.standard.set(selectedAgentID, forKey: SettingsKeys.selectedAgentID)
         } else if entry.opencodeSessionID != nil, entry.codexThreadID == nil {
@@ -306,13 +317,28 @@ final class FloatScopeModel: ObservableObject {
         }
     }
 
+    func deleteHistory(_ entry: ConversationHistoryEntry) {
+        let root = settings.conversationRoot
+        let agents = agentConfigs
+        historyEntries.removeAll { $0.id == entry.id }
+        Task.detached(priority: .userInitiated) {
+            ConversationHistoryStore.delete(entry)
+            let entries = ConversationHistoryStore.list(conversationRoot: root, agents: agents)
+            await MainActor.run {
+                self.historyEntries = entries
+            }
+        }
+    }
+
     func expand() {
+        guard !isExpanded else { return }
         isExpanded = true
         onExpansionChanged?(true)
     }
 
     func collapse() {
         guard !showSettings else { return }
+        guard isExpanded else { return }
         isExpanded = false
         onExpansionChanged?(false)
     }
@@ -379,10 +405,17 @@ final class FloatScopeModel: ObservableObject {
     }
 
     private func sendWithFreshScreenCapture(prompt: String) {
-        let agent = resolveAgentID(for: prompt)
+        let agents = resolveAgentIDs(for: prompt)
+        guard !agents.isEmpty else { return }
+        if isGroupAgentID(selectedAgentID), agents.count > 1 {
+            bridge.prepareGroupConversationIfNeeded()
+        }
         appendUser(prompt)
-        currentAgentResponse[agent] = nil
-        moods[agent] = .watching
+        pendingResponseAgents.formUnion(agents)
+        for agent in agents {
+            currentAgentResponse[agent] = nil
+            moods[agent] = .watching
+        }
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -392,45 +425,151 @@ final class FloatScopeModel: ObservableObject {
                     messages[index].attachments = [Self.chatAttachment(for: stableURL)]
                     saveTranscript()
                 }
-                bridge.send(agent: agent, message: prompt, attachments: [stableURL], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, agent2ModelPreset: agent2ModelPreset, agent2VariantPreset: agent2VariantPreset)
+                for agent in agents {
+                    bridge.send(agent: agent, message: outboundMessage(prompt, groupAgents: agents), attachments: [stableURL], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
+                }
                 appendSystem("Captured screen: \(url.lastPathComponent)")
-                moods[agent] = .thinking
+                for agent in agents {
+                    moods[agent] = .thinking
+                }
             } catch {
-                moods[agent] = .error
+                for agent in agents {
+                    pendingResponseAgents.remove(agent)
+                    moods[agent] = .error
+                }
                 appendSystem(error.localizedDescription)
             }
         }
     }
 
     private func handleWatchCapture(_ result: Result<URL, Error>) {
-        let agent = resolveAgentID(for: "")
+        let agents = resolveAgentIDs(for: "")
+        guard !agents.isEmpty else { return }
+        if isGroupAgentID(selectedAgentID), agents.count > 1 {
+            bridge.prepareGroupConversationIfNeeded()
+        }
         switch result {
         case .success(let url):
-            moods[agent] = .watching
-            currentAgentResponse[agent] = nil
-            bridge.send(agent: agent, message: "定时读屏：请根据这张屏幕截图给出简短观察。", attachments: [url], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, agent2ModelPreset: agent2ModelPreset, agent2VariantPreset: agent2VariantPreset)
+            pendingResponseAgents.formUnion(agents)
+            for agent in agents {
+                moods[agent] = .watching
+                currentAgentResponse[agent] = nil
+                let message = "定时读屏：请根据这张屏幕截图给出简短观察。"
+                bridge.send(agent: agent, message: outboundMessage(message, groupAgents: agents, currentMessageAlreadyAppended: false), attachments: [url], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
+            }
             appendSystem("Watch capture sent.")
-            moods[agent] = .thinking
+            for agent in agents {
+                moods[agent] = .thinking
+            }
         case .failure(let error):
-            moods[agent] = .error
+            for agent in agents {
+                pendingResponseAgents.remove(agent)
+                moods[agent] = .error
+            }
             appendSystem(error.localizedDescription)
             scheduler?.stop()
             watchMode = nil
         }
     }
 
+    private func resolveAgentIDs(for text: String) -> [String] {
+        if isGroupAgentID(selectedAgentID) {
+            return agentConfigs.map(\.id)
+        }
+        return [resolveAgentID(for: text)]
+    }
+
     private func resolveAgentID(for text: String) -> String {
-        if selectedAgentID != "auto" {
+        if !isGroupAgentID(selectedAgentID) {
             return selectedAgentID
         }
         let lower = text.lowercased()
         if let matched = agentConfigs.first(where: { lower.contains($0.id.lowercased()) || lower.contains($0.displayName.lowercased()) }) {
             return matched.id
         }
-        if lower.contains("agent 2") || lower.contains("agent2") {
+        if lower.contains("agent2") || text.contains("agent2") {
             return agentConfigs.dropFirst().first?.id ?? agentConfigs.first?.id ?? "agent1"
         }
         return agentConfigs.first?.id ?? "agent1"
+    }
+
+    private func isGroupAgentID(_ id: String) -> Bool {
+        id == "group" || id == "auto"
+    }
+
+    private func outboundMessage(_ message: String, groupAgents: [String], currentMessageAlreadyAppended: Bool = true) -> String {
+        guard isGroupAgentID(selectedAgentID), groupAgents.count > 1 else {
+            return message
+        }
+
+        guard let context = groupContextTranscript(currentMessageAlreadyAppended: currentMessageAlreadyAppended) else {
+            return message
+        }
+        let attachmentNote = currentMessageAlreadyAppended ? currentAttachmentNote() : ""
+        return """
+        \(message)\(attachmentNote)
+
+        <!-- FloatScope group context. Reference only. Do not mention this block.
+        \(context)
+        -->
+        """
+    }
+
+    private func groupContextTranscript(currentMessageAlreadyAppended: Bool) -> String? {
+        let sourceMessages = currentMessageAlreadyAppended ? Array(messages.dropLast()) : messages
+        let recentMessages = sourceMessages
+            .filter { message in
+                switch message.role {
+                case .system:
+                    return false
+                case .user, .agent:
+                    return !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !message.attachments.isEmpty
+                }
+            }
+            .suffix(20)
+
+        guard !recentMessages.isEmpty else { return nil }
+
+        let lines = recentMessages.map { message in
+            let speaker: String
+            switch message.role {
+            case .user:
+                speaker = "User"
+            case .agent(let agent):
+                speaker = name(for: agent)
+            case .system:
+                speaker = "System"
+            }
+
+            let text = Self.compactedContextText(message.text)
+            let attachments = message.attachments.isEmpty
+                ? ""
+                : " [attachments: \(message.attachments.map(\.filename).joined(separator: ", "))]"
+            return "\(speaker): \(text)\(attachments)"
+        }
+
+        return Self.truncatedContext(lines.joined(separator: "\n"))
+    }
+
+    private func currentAttachmentNote() -> String {
+        guard let current = messages.last, !current.attachments.isEmpty else { return "" }
+        let names = current.attachments.map(\.filename).joined(separator: ", ")
+        return "\n当前消息附件：\(names)"
+    }
+
+    private static func compactedContextText(_ text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\n\n+", with: "\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count > 260 else { return normalized }
+        let index = normalized.index(normalized.startIndex, offsetBy: 260)
+        return String(normalized[..<index]) + "..."
+    }
+
+    private static func truncatedContext(_ text: String) -> String {
+        guard text.count > 3_200 else { return text }
+        let index = text.index(text.endIndex, offsetBy: -3_200)
+        return "...[earlier group context truncated]\n" + String(text[index...])
     }
 
     private func handleBridgeEvent(_ event: AgentBridgeEvent) {
@@ -443,8 +582,10 @@ final class FloatScopeModel: ObservableObject {
             expand()
             appendAgentDelta(agent: agent, delta: delta)
         case .completed(let agent):
+            pendingResponseAgents.remove(agent)
             moods[agent] = .idle
         case .failed(let agent, let message):
+            pendingResponseAgents.remove(agent)
             moods[agent] = .error
             appendSystem("\(name(for: agent)): \(message)")
         }
@@ -495,6 +636,7 @@ final class FloatScopeModel: ObservableObject {
     }
 
     private func resetMoodMap() {
+        pendingResponseAgents.removeAll()
         moods = Dictionary(uniqueKeysWithValues: agentConfigs.map { ($0.id, AgentMoodState.idle) })
     }
 

@@ -156,7 +156,7 @@ enum AgentID: String, CaseIterable, Identifiable {
         switch self {
         case .agent1: "Agent 1"
         case .agent2: "Agent 2"
-        case .auto: "Auto"
+        case .auto: "Group"
         }
     }
 }
@@ -539,9 +539,9 @@ struct SettingsKeys {
     static let windowFrame = "FloatScope.windowFrame"
     static let modelPreset = "FloatScope.modelPreset"
     static let codexModelPreset = "FloatScope.codexModelPreset"
-    static let agent2ModelPreset = "FloatScope.agent2ModelPreset"
+    static let secondaryModelPreset = "FloatScope.secondaryModelPreset"
     static let codexEffortPreset = "FloatScope.codexEffortPreset"
-    static let agent2VariantPreset = "FloatScope.agent2VariantPreset"
+    static let secondaryVariantPreset = "FloatScope.secondaryVariantPreset"
     static let agent1DisplayName = "FloatScope.agent1DisplayName"
     static let agent2DisplayName = "FloatScope.agent2DisplayName"
     static let userColor = "FloatScope.userColor"
@@ -572,7 +572,7 @@ struct FloatScopeSettings {
     var agent1DisplayName: String {
         get {
             let stored = UserDefaults.standard.string(forKey: SettingsKeys.agent1DisplayName)
-            return stored ?? AgentHubConfigStore.agent(at: 0).displayName
+            return stored == "Agent 1" ? "agent1" : (stored ?? AgentHubConfigStore.agent(at: 0).displayName)
         }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.agent1DisplayName) }
     }
@@ -580,7 +580,7 @@ struct FloatScopeSettings {
     var agent2DisplayName: String {
         get {
             let stored = UserDefaults.standard.string(forKey: SettingsKeys.agent2DisplayName)
-            return stored ?? AgentHubConfigStore.agent(at: 1).displayName
+            return stored == "Agent 2" ? "agent2" : (stored ?? AgentHubConfigStore.agent(at: 1).displayName)
         }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.agent2DisplayName) }
     }
@@ -686,20 +686,20 @@ struct FloatScopeSettings {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKeys.codexEffortPreset) }
     }
 
-    var agent2ModelPreset: OpenCodeModelPreset {
+    var secondaryModelPreset: OpenCodeModelPreset {
         get {
-            OpenCodeModelPreset(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.agent2ModelPreset) ?? "")
+            OpenCodeModelPreset(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.secondaryModelPreset) ?? "")
                 ?? .deepSeekV4FlashFree
         }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKeys.agent2ModelPreset) }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKeys.secondaryModelPreset) }
     }
 
-    var agent2VariantPreset: OpenCodeVariantPreset {
+    var secondaryVariantPreset: OpenCodeVariantPreset {
         get {
-            OpenCodeVariantPreset(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.agent2VariantPreset) ?? "")
+            OpenCodeVariantPreset(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.secondaryVariantPreset) ?? "")
                 ?? .automatic
         }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKeys.agent2VariantPreset) }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKeys.secondaryVariantPreset) }
     }
 }
 

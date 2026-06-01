@@ -52,6 +52,15 @@ final class ScreenWatcher {
         rollingTask = nil
     }
 
+    func setRollingCacheEnabled(_ enabled: Bool) {
+        if enabled {
+            startRollingCache()
+        } else {
+            stopRollingCache()
+            clearRecentCaptures()
+        }
+    }
+
     func captureRecentOrFresh(maxAge: TimeInterval = 12) async throws -> URL {
         if let recent = recentCaptures.last,
            Date().timeIntervalSince(recent.date) <= maxAge {
@@ -59,7 +68,6 @@ final class ScreenWatcher {
         }
         let url = try await capture()
         remember(url)
-        startRollingCache()
         return url
     }
 
@@ -87,20 +95,29 @@ final class ScreenWatcher {
         filter.includeMenuBar = true
 
         let config = SCStreamConfiguration()
-        config.width = display.width
-        config.height = display.height
+        let maxWidth = 1920
+        if display.width > maxWidth {
+            config.width = maxWidth
+            config.height = max(1, Int(Double(display.height) * Double(maxWidth) / Double(display.width)))
+        } else {
+            config.width = display.width
+            config.height = display.height
+        }
         config.showsCursor = true
         config.capturesAudio = false
 
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        guard let data = bitmap.representation(using: .png, properties: [:]) else {
-            throw ScreenWatcherError.encodeFailed
+        let data = try autoreleasepool {
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            guard let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.76]) else {
+                throw ScreenWatcherError.encodeFailed
+            }
+            return data
         }
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FloatScope", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("screen-\(Int(Date().timeIntervalSince1970)).png")
+        let file = directory.appendingPathComponent("screen-\(Int(Date().timeIntervalSince1970)).jpg")
         try data.write(to: file)
         return file
     }
@@ -108,8 +125,15 @@ final class ScreenWatcher {
     private func remember(_ url: URL) {
         recentCaptures.append(CaptureEntry(url: url, date: Date()))
         if recentCaptures.count > 5 {
+            let removed = recentCaptures.prefix(recentCaptures.count - 5)
+            removed.forEach { try? FileManager.default.removeItem(at: $0.url) }
             recentCaptures.removeFirst(recentCaptures.count - 5)
         }
+    }
+
+    private func clearRecentCaptures() {
+        recentCaptures.forEach { try? FileManager.default.removeItem(at: $0.url) }
+        recentCaptures.removeAll()
     }
 }
 

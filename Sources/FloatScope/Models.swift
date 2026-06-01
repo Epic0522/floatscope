@@ -549,6 +549,8 @@ struct SettingsKeys {
     static let agent2Color = "FloatScope.agent2Color"
     static let systemColor = "FloatScope.systemColor"
     static let showSystemMessages = "FloatScope.showSystemMessages"
+    static let toggleShortcut = "FloatScope.toggleShortcut"
+    static let screenReplayCacheEnabled = "FloatScope.screenReplayCacheEnabled"
 }
 
 struct FloatScopeSettings {
@@ -570,7 +572,7 @@ struct FloatScopeSettings {
     var agent1DisplayName: String {
         get {
             let stored = UserDefaults.standard.string(forKey: SettingsKeys.agent1DisplayName)
-            return stored == "Agent 1" ? "agent1" : (stored ?? AgentHubConfigStore.agent(at: 0).displayName)
+            return stored ?? AgentHubConfigStore.agent(at: 0).displayName
         }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.agent1DisplayName) }
     }
@@ -578,7 +580,7 @@ struct FloatScopeSettings {
     var agent2DisplayName: String {
         get {
             let stored = UserDefaults.standard.string(forKey: SettingsKeys.agent2DisplayName)
-            return stored == "Agent 2" ? "agent2" : (stored ?? AgentHubConfigStore.agent(at: 1).displayName)
+            return stored ?? AgentHubConfigStore.agent(at: 1).displayName
         }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.agent2DisplayName) }
     }
@@ -646,6 +648,16 @@ struct FloatScopeSettings {
     var showSystemMessages: Bool {
         get { UserDefaults.standard.bool(forKey: SettingsKeys.showSystemMessages) }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.showSystemMessages) }
+    }
+
+    var screenReplayCacheEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: SettingsKeys.screenReplayCacheEnabled) }
+        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.screenReplayCacheEnabled) }
+    }
+
+    var toggleShortcut: String {
+        get { UserDefaults.standard.string(forKey: SettingsKeys.toggleShortcut) ?? "Option+Space" }
+        set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.toggleShortcut) }
     }
 
     var codexModelPreset: CodexModelPreset {

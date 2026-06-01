@@ -1,0 +1,11 @@
+[actions.Run]
+command = "./script/build_and_run.sh"
+description = "Build and launch FloatScope.app"
+
+[actions."Build App"]
+command = "./script/build_and_run.sh --no-launch"
+description = "Build dist/FloatScope.app without launching"
+
+[actions.Verify]
+command = "./script/build_and_run.sh --verify"
+description = "Build, launch, and verify FloatScope is running"

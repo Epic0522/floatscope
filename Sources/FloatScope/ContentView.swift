@@ -1,5 +1,52 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+
+private struct FrostedGlassBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .hudWindow
+    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+    var state: NSVisualEffectView.State = .active
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = state
+        view.isEmphasized = true
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = state
+        view.isEmphasized = true
+    }
+}
+
+private struct GlassSurface: ViewModifier {
+    let cornerRadius: CGFloat
+    var material: NSVisualEffectView.Material = .hudWindow
+    var strokeOpacity: Double = 0.18
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                FrostedGlassBackground(material: material)
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(.white.opacity(strokeOpacity), lineWidth: 1)
+            }
+    }
+}
+
+private extension View {
+    func glassSurface(cornerRadius: CGFloat, material: NSVisualEffectView.Material = .hudWindow, strokeOpacity: Double = 0.18) -> some View {
+        modifier(GlassSurface(cornerRadius: cornerRadius, material: material, strokeOpacity: strokeOpacity))
+    }
+}
 
 struct ContentView: View {
     @ObservedObject var model: FloatScopeModel
@@ -106,12 +153,14 @@ private struct CapsuleBar: View {
     var body: some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(.regularMaterial)
                 .frame(width: shellWidth)
-                .overlay(alignment: .leading) {
+                .overlay {
+                    FrostedGlassBackground(material: .hudWindow)
+                        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                }
+                .overlay {
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .strokeBorder(.white.opacity(0.16), lineWidth: 1)
-                        .frame(width: shellWidth)
+                        .strokeBorder(.white.opacity(0.2), lineWidth: 1)
                 }
 
             VStack(spacing: 8) {
@@ -146,13 +195,20 @@ private struct CapsuleBar: View {
                         .frame(minWidth: 80)
                         .help("编辑长文本")
                     } else {
-                        TextField("", text: $model.inputText)
-                            .textFieldStyle(.plain)
-                            .focused(inputFocused)
-                            .frame(minWidth: 80)
-                            .onSubmit {
+                        AppKitSingleLineInput(
+                            text: $model.inputText,
+                            isFocused: inputFocused,
+                            onSubmit: {
                                 model.sendCurrentInput()
+                            },
+                            onShiftEnter: {
+                                if !model.inputText.hasSuffix("\n") {
+                                    model.inputText += "\n"
+                                }
+                                model.openLongInputEditor()
                             }
+                        )
+                            .frame(minWidth: 80)
                             .onChange(of: inputFocused.wrappedValue) { _, focused in
                                 if focused { model.expand() }
                             }
@@ -189,7 +245,7 @@ private struct CapsuleBar: View {
                         model.toggleExpanded()
                     }
 
-                    IconButton(systemName: model.watchMode == nil ? "eye" : "eye.fill", help: "看屏幕") {
+                    IconButton(systemName: model.watchMode == nil ? "camera" : "camera.fill", help: "看屏幕") {
                         model.manualScreenCapture()
                     }
                 }
@@ -385,6 +441,182 @@ private struct AttachmentStrip: View {
     }
 }
 
+private struct AppKitSingleLineInput: NSViewRepresentable {
+    @Binding var text: String
+    var isFocused: FocusState<Bool>.Binding
+    var onSubmit: () -> Void
+    var onShiftEnter: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, isFocused: isFocused, onSubmit: onSubmit, onShiftEnter: onShiftEnter)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let textView = SingleLineTextView()
+        textView.delegate = context.coordinator
+        textView.onSubmit = onSubmit
+        textView.onShiftEnter = onShiftEnter
+        textView.string = text
+        textView.font = .systemFont(ofSize: 13)
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 0, height: 4)
+        textView.minSize = NSSize(width: 0, height: 22)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: 22)
+        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = false
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: 22)
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.heightTracksTextView = true
+        textView.autoresizingMask = [.height]
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? SingleLineTextView else { return }
+        if textView.string != text {
+            textView.string = text
+            textView.selectedRange = NSRange(location: text.utf16.count, length: 0)
+        }
+        textView.onSubmit = onSubmit
+        textView.onShiftEnter = onShiftEnter
+        context.coordinator.text = $text
+        context.coordinator.isFocused = isFocused
+        context.coordinator.onSubmit = onSubmit
+        context.coordinator.onShiftEnter = onShiftEnter
+        context.coordinator.textView = textView
+
+        if isFocused.wrappedValue, textView.window?.firstResponder !== textView {
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+                textView.selectedRange = NSRange(location: textView.string.utf16.count, length: 0)
+                textView.keepInsertionPointVisible()
+            }
+        } else {
+            DispatchQueue.main.async {
+                textView.keepInsertionPointVisible()
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var text: Binding<String>
+        var isFocused: FocusState<Bool>.Binding
+        var onSubmit: () -> Void
+        var onShiftEnter: () -> Void
+        weak var textView: SingleLineTextView?
+
+        init(text: Binding<String>, isFocused: FocusState<Bool>.Binding, onSubmit: @escaping () -> Void, onShiftEnter: @escaping () -> Void) {
+            self.text = text
+            self.isFocused = isFocused
+            self.onSubmit = onSubmit
+            self.onShiftEnter = onShiftEnter
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            isFocused.wrappedValue = true
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            isFocused.wrappedValue = false
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? SingleLineTextView else { return }
+            if textView.hasMarkedText() {
+                textView.keepInsertionPointVisible()
+                return
+            }
+            text.wrappedValue = textView.singleLineString
+            textView.keepInsertionPointVisible()
+        }
+    }
+
+    final class SingleLineTextView: NSTextView {
+        var onSubmit: (() -> Void)?
+        var onShiftEnter: (() -> Void)?
+
+        override func keyDown(with event: NSEvent) {
+            if !hasMarkedText(),
+               let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first,
+               scalar.value == 13 || scalar.value == 3 {
+                let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                if flags == .shift {
+                    onShiftEnter?()
+                    return
+                }
+                if flags.isEmpty {
+                    onSubmit?()
+                    return
+                }
+            }
+            super.keyDown(with: event)
+            keepInsertionPointVisible()
+        }
+
+        override func paste(_ sender: Any?) {
+            super.paste(sender)
+            string = singleLineString
+            selectedRange = NSRange(location: min(selectedRange.location, string.utf16.count), length: 0)
+            keepInsertionPointVisible()
+        }
+
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+                  let character = event.charactersIgnoringModifiers?.lowercased() else {
+                return super.performKeyEquivalent(with: event)
+            }
+
+            switch character {
+            case "x":
+                cut(nil)
+                return true
+            case "c":
+                copy(nil)
+                return true
+            case "v":
+                paste(nil)
+                return true
+            case "a":
+                selectAll(nil)
+                return true
+            case "z":
+                if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift) {
+                    undoManager?.redo()
+                } else {
+                    undoManager?.undo()
+                }
+                keepInsertionPointVisible()
+                return true
+            default:
+                return super.performKeyEquivalent(with: event)
+            }
+        }
+
+        func keepInsertionPointVisible() {
+            let location = min(selectedRange.location, string.utf16.count)
+            scrollRangeToVisible(NSRange(location: location, length: 0))
+        }
+
+        var singleLineString: String {
+            string.replacingOccurrences(of: "\n", with: "")
+        }
+    }
+}
+
 private struct ConversationPanel: View {
     @ObservedObject var model: FloatScopeModel
     private let bottomID = "FloatScopeConversationBottom"
@@ -401,7 +633,7 @@ private struct ConversationPanel: View {
 
             if model.watchMode != nil {
                 HStack {
-                    Image(systemName: "eye.fill")
+                    Image(systemName: "camera.fill")
                         .font(.caption)
                         .foregroundStyle(.cyan)
                     Spacer()
@@ -438,11 +670,7 @@ private struct ConversationPanel: View {
             }
         }
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.14), lineWidth: 1)
-        }
+        .glassSurface(cornerRadius: 18, material: .hudWindow, strokeOpacity: 0.16)
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
@@ -843,15 +1071,11 @@ private struct LongInputEditorView: View {
 
             AppKitTextEditor(text: $model.inputText)
                 .padding(12)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(.white.opacity(0.16), lineWidth: 1)
-                }
+                .glassSurface(cornerRadius: 16, material: .popover, strokeOpacity: 0.16)
         }
         .padding(18)
         .frame(width: 640, height: 430)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .glassSurface(cornerRadius: 22, material: .hudWindow, strokeOpacity: 0.18)
         .onAppear {
             editorFocused = true
         }
@@ -871,7 +1095,7 @@ private struct AppKitTextEditor: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
 
-        let textView = NSTextView()
+        let textView = ShortcutTextView()
         textView.delegate = context.coordinator
         textView.string = text
         textView.font = .systemFont(ofSize: 18)
@@ -912,6 +1136,39 @@ private struct AppKitTextEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             text = textView.string
+        }
+    }
+
+    final class ShortcutTextView: NSTextView {
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+                  let character = event.charactersIgnoringModifiers?.lowercased() else {
+                return super.performKeyEquivalent(with: event)
+            }
+
+            switch character {
+            case "x":
+                cut(nil)
+                return true
+            case "c":
+                copy(nil)
+                return true
+            case "v":
+                paste(nil)
+                return true
+            case "a":
+                selectAll(nil)
+                return true
+            case "z":
+                if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift) {
+                    undoManager?.redo()
+                } else {
+                    undoManager?.undo()
+                }
+                return true
+            default:
+                return super.performKeyEquivalent(with: event)
+            }
         }
     }
 }
@@ -1005,6 +1262,11 @@ private struct SettingsView: View {
                     set: { model.settings.conversationRoot = $0 }
                 ))
 
+                settingsTextField("Toggle Shortcut", text: Binding(
+                    get: { model.settings.toggleShortcut },
+                    set: { model.settings.toggleShortcut = $0 }
+                ))
+
                 Toggle("Launch at Login", isOn: Binding(
                     get: { model.settings.launchAtLogin },
                     set: { model.settings.launchAtLogin = $0 }
@@ -1013,6 +1275,11 @@ private struct SettingsView: View {
                 Toggle("Show System Messages", isOn: Binding(
                     get: { model.settings.showSystemMessages },
                     set: { model.settings.showSystemMessages = $0 }
+                ))
+
+                Toggle("Screen Replay Cache", isOn: Binding(
+                    get: { model.settings.screenReplayCacheEnabled },
+                    set: { model.settings.screenReplayCacheEnabled = $0 }
                 ))
 
                 HStack {
@@ -1047,7 +1314,9 @@ private struct SettingsView: View {
             }
             .padding(22)
         }
-        .background(.regularMaterial)
+        .background {
+            FrostedGlassBackground(material: .windowBackground)
+        }
         .frame(width: 640, height: 720)
     }
 

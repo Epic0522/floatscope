@@ -58,7 +58,7 @@ final class FloatScopeModel: ObservableObject {
                 self?.handleWatchCapture(result)
             }
         }
-        screenWatcher.startRollingCache()
+        screenWatcher.setRollingCacheEnabled(settings.screenReplayCacheEnabled)
         bridge.startAll()
         appendSystem("FloatScope ready.")
     }
@@ -78,10 +78,6 @@ final class FloatScopeModel: ObservableObject {
         pendingAttachments.removeAll()
         expand()
 
-        if !trimmed.isEmpty, handleCommand(trimmed) {
-            return
-        }
-
         if isScreenCue(trimmed) {
             sendWithFreshScreenCapture(prompt: trimmed)
             return
@@ -97,6 +93,21 @@ final class FloatScopeModel: ObservableObject {
 
     func manualScreenCapture() {
         sendWithFreshScreenCapture(prompt: "你看这个")
+    }
+
+    func toggleScreenWatch() {
+        if watchMode != nil {
+            scheduler?.stop()
+            watchMode = nil
+            resetMoodMap()
+            appendSystem("Screen watch stopped.")
+            return
+        }
+
+        let mode = WatchIntervalMode.fixed(settings.watchDefaultInterval)
+        watchMode = mode
+        scheduler?.start(intervalMode: mode)
+        appendSystem("Screen watch started.")
     }
 
     func addAttachments() {
@@ -190,8 +201,10 @@ final class FloatScopeModel: ObservableObject {
         settings.codexEffortPreset = codexEffortPreset
         settings.agent2ModelPreset = agent2ModelPreset
         settings.agent2VariantPreset = agent2VariantPreset
+        screenWatcher.setRollingCacheEnabled(settings.screenReplayCacheEnabled)
         UserDefaults.standard.set(selectedAgent.rawValue, forKey: SettingsKeys.selectedAgent)
         UserDefaults.standard.set(selectedAgentID, forKey: SettingsKeys.selectedAgentID)
+        NotificationCenter.default.post(name: .floatScopeSettingsApplied, object: nil)
         showSettings = false
     }
 
@@ -307,70 +320,6 @@ final class FloatScopeModel: ObservableObject {
     func toggleExpanded() {
         isExpanded.toggle()
         onExpansionChanged?(isExpanded)
-    }
-
-    private func handleCommand(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        if lower.hasPrefix("/agent ") {
-            let value = text.replacingOccurrences(of: "/agent ", with: "", options: [.caseInsensitive]).trimmingCharacters(in: .whitespaces)
-            if value.lowercased() == "auto" {
-                selectedAgentID = "auto"
-                UserDefaults.standard.set(selectedAgentID, forKey: SettingsKeys.selectedAgentID)
-                appendSystem("Switched.")
-            } else if let agent = agentConfigs.first(where: { $0.id == value || $0.displayName.localizedCaseInsensitiveContains(value) }) {
-                selectedAgentID = agent.id
-                UserDefaults.standard.set(selectedAgentID, forKey: SettingsKeys.selectedAgentID)
-                appendSystem("Switched.")
-            } else {
-                appendSystem("Unknown agent: \(value).")
-            }
-            return true
-        }
-
-        if lower == "/new" || lower == "/new conversation" {
-            startNewConversation()
-            return true
-        }
-
-        if lower == "/watch off" {
-            scheduler?.stop()
-            watchMode = nil
-            resetMoodMap()
-            appendSystem("Screen watch stopped.")
-            return true
-        }
-
-        if lower.hasPrefix("/watch random ") {
-            let rangeText = lower.replacingOccurrences(of: "/watch random ", with: "")
-                .replacingOccurrences(of: "s", with: "")
-            let parts = rangeText.split(separator: "-").compactMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
-            if parts.count == 2 {
-                let mode = WatchIntervalMode.random(parts[0], parts[1])
-                watchMode = mode
-                scheduler?.start(intervalMode: mode)
-                appendSystem("Screen watch started.")
-            } else {
-                appendSystem("Use /watch random 45-90s.")
-            }
-            return true
-        }
-
-        if lower.hasPrefix("/watch ") {
-            let value = lower.replacingOccurrences(of: "/watch ", with: "")
-                .replacingOccurrences(of: "s", with: "")
-                .trimmingCharacters(in: .whitespaces)
-            if let interval = TimeInterval(value) {
-                let mode = WatchIntervalMode.fixed(interval)
-                watchMode = mode
-                scheduler?.start(intervalMode: mode)
-                appendSystem("Screen watch started.")
-            } else {
-                appendSystem("Use /watch 60s.")
-            }
-            return true
-        }
-
-        return false
     }
 
     private func persistAgentConfigs() {

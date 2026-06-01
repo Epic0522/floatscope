@@ -1,6 +1,11 @@
 import AppKit
+import Carbon.HIToolbox
 import Darwin
 import SwiftUI
+
+extension Notification.Name {
+    static let floatScopeSettingsApplied = Notification.Name("FloatScope.settingsApplied")
+}
 
 @main
 struct FloatScopeApp {
@@ -20,12 +25,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model: FloatScopeModel?
     private var statusItem: NSStatusItem?
     private var signalSources: [DispatchSourceSignal] = []
+    private let hotKeyManager = GlobalHotKeyManager()
+    private var conversationFollowTarget: NSRect?
+    private var conversationFollowTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let model = FloatScopeModel()
         self.model = model
         installSignalHandlers()
         installStatusItem()
+        installHotKey()
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsApplied), name: .floatScopeSettingsApplied, object: nil)
 
         let rootView = ContentView(model: model)
         let panel = FloatingPanel(contentRect: Self.restoredFrame())
@@ -50,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        hotKeyManager.unregister()
         model?.stop()
     }
 
@@ -72,13 +83,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "scope", accessibilityDescription: "FloatScope")
+        item.button?.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: "FloatScope")
         item.button?.imagePosition = .imageOnly
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open FloatScope", action: #selector(openFloatScope), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Reset Position", action: #selector(resetPosition), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Conversation History...", action: #selector(openHistory), keyEquivalent: "h"))
         menu.addItem(NSMenuItem(title: "New Conversation", action: #selector(newConversation), keyEquivalent: "n"))
+        menu.addItem(NSMenuItem(title: "Toggle Screen Watch", action: #selector(toggleScreenWatch), keyEquivalent: "w"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
@@ -91,6 +104,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openFloatScope() {
+        if panel?.isVisible == true {
+            panel?.orderOut(nil)
+            conversationPanel?.orderOut(nil)
+            return
+        }
         panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         model?.expand()
@@ -114,6 +132,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model?.startNewConversation()
     }
 
+    @objc private func toggleScreenWatch() {
+        panel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        model?.toggleScreenWatch()
+    }
+
+    @objc private func resetPosition() {
+        guard let panel else { return }
+        let frame = Self.defaultFrame(width: panel.frame.width)
+        panel.setFrame(frame, display: true, animate: false)
+        UserDefaults.standard.set(NSStringFromRect(FloatingPanelMetrics.restingFrame(from: frame)), forKey: SettingsKeys.windowFrame)
+        repositionConversationPanel(animated: false)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func settingsApplied() {
+        installHotKey()
+    }
+
     @objc private func quitFloatScope() {
         model?.stop()
         NSApp.terminate(nil)
@@ -122,13 +160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowDidMove(_ notification: Notification) {
         guard let frame = panel?.frame else { return }
         UserDefaults.standard.set(NSStringFromRect(FloatingPanelMetrics.restingFrame(from: frame)), forKey: SettingsKeys.windowFrame)
-        repositionConversationPanel()
+        repositionConversationPanel(animated: true)
     }
 
     func windowDidResize(_ notification: Notification) {
         guard let frame = panel?.frame else { return }
         UserDefaults.standard.set(NSStringFromRect(FloatingPanelMetrics.restingFrame(from: frame)), forKey: SettingsKeys.windowFrame)
-        repositionConversationPanel()
+        repositionConversationPanel(animated: false)
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -144,12 +182,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
+        return defaultFrame(width: 520)
+    }
+
+    private static func defaultFrame(width: CGFloat) -> NSRect {
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let width: CGFloat = 520
         let height = FloatingPanelMetrics.collapsedHeight
         return NSRect(
             x: screenFrame.midX - width / 2,
-            y: screenFrame.minY + 28,
+            y: screenFrame.midY - height / 2 - 180,
             width: width,
             height: height
         )
@@ -167,9 +208,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
-    private func repositionConversationPanel() {
+    private func repositionConversationPanel(animated: Bool = false) {
         guard let panel, let conversationPanel else { return }
-        conversationPanel.setFrame(Self.conversationFrame(for: panel.frame), display: true, animate: false)
+        let target = Self.conversationFrame(for: panel.frame)
+        guard animated, conversationPanel.isVisible else {
+            conversationFollowTimer?.invalidate()
+            conversationFollowTimer = nil
+            conversationFollowTarget = nil
+            setConversationPanelFrame(target)
+            return
+        }
+
+        conversationFollowTarget = target
+        startConversationFollowTimerIfNeeded()
+    }
+
+    private func startConversationFollowTimerIfNeeded() {
+        guard conversationFollowTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(conversationFollowTick(_:)), userInfo: nil, repeats: true)
+        conversationFollowTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func conversationFollowTick(_ timer: Timer) {
+        guard let conversationPanel, let target = conversationFollowTarget else {
+            timer.invalidate()
+            conversationFollowTimer = nil
+            return
+        }
+
+        let current = conversationPanel.frame
+        let next = Self.dampedFrame(from: current, to: target)
+        setConversationPanelFrame(next)
+
+        if Self.frameDistance(next, target) < 0.75 {
+            setConversationPanelFrame(target)
+            timer.invalidate()
+            conversationFollowTimer = nil
+            conversationFollowTarget = nil
+        }
+    }
+
+    private func setConversationPanelFrame(_ frame: NSRect) {
+        guard let conversationPanel else { return }
+        conversationPanel.isTrackingParentMove = true
+        conversationPanel.setFrame(frame, display: false, animate: false)
+        conversationPanel.isTrackingParentMove = false
+    }
+
+    private static func dampedFrame(from current: NSRect, to target: NSRect) -> NSRect {
+        let factor: CGFloat = 0.38
+        return NSRect(
+            x: current.minX + (target.minX - current.minX) * factor,
+            y: current.minY + (target.minY - current.minY) * factor,
+            width: current.width + (target.width - current.width) * factor,
+            height: current.height + (target.height - current.height) * factor
+        )
+    }
+
+    private static func frameDistance(_ lhs: NSRect, _ rhs: NSRect) -> CGFloat {
+        max(
+            abs(lhs.minX - rhs.minX),
+            abs(lhs.minY - rhs.minY),
+            abs(lhs.width - rhs.width),
+            abs(lhs.height - rhs.height)
+        )
+    }
+
+    private func installHotKey() {
+        hotKeyManager.register(shortcut: model?.settings.toggleShortcut ?? FloatScopeSettings().toggleShortcut) { [weak self] in
+            self?.openFloatScope()
+        }
     }
 
     private func setConversationVisible(_ visible: Bool) {
@@ -212,6 +321,8 @@ enum FloatingPanelMetrics {
 }
 
 final class ConversationFloatingPanel: NSPanel {
+    var isTrackingParentMove = false
+
     override var contentView: NSView? {
         didSet { forceRoundedLayout() }
     }
@@ -242,7 +353,9 @@ final class ConversationFloatingPanel: NSPanel {
 
     override func setFrame(_ frameRect: NSRect, display flag: Bool, animate animateFlag: Bool) {
         super.setFrame(frameRect, display: flag, animate: animateFlag)
-        forceRoundedLayout()
+        if !isTrackingParentMove {
+            forceRoundedLayout()
+        }
     }
 }
 
@@ -379,6 +492,124 @@ private extension NSPanel {
         contentView?.layoutSubtreeIfNeeded()
         contentView?.displayIfNeeded()
         invalidateShadow()
+    }
+}
+
+private final class GlobalHotKeyManager: @unchecked Sendable {
+    private var hotKeyRef: EventHotKeyRef?
+    private var eventHandler: EventHandlerRef?
+    private var action: (() -> Void)?
+    private let signature = OSType(UInt32(ascii: "FSCP"))
+
+    func register(shortcut: String, action: @escaping () -> Void) {
+        unregister()
+        guard let parsed = HotKeyParser.parse(shortcut) else { return }
+        self.action = action
+
+        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(GetEventDispatcherTarget(), { _, _, userData in
+            guard let userData else { return noErr }
+            let manager = Unmanaged<GlobalHotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async {
+                manager.action?()
+            }
+            return noErr
+        }, 1, &eventSpec, selfPointer, &eventHandler)
+
+        let hotKeyID = EventHotKeyID(signature: signature, id: 1)
+        RegisterEventHotKey(parsed.keyCode, parsed.modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
+    }
+
+    func unregister() {
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+        }
+        if let eventHandler {
+            RemoveEventHandler(eventHandler)
+        }
+        hotKeyRef = nil
+        eventHandler = nil
+        action = nil
+    }
+}
+
+private enum HotKeyParser {
+    static func parse(_ shortcut: String) -> (keyCode: UInt32, modifiers: UInt32)? {
+        let parts = shortcut
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "⌥", with: "option")
+            .replacingOccurrences(of: "⌘", with: "command")
+            .replacingOccurrences(of: "⇧", with: "shift")
+            .replacingOccurrences(of: "⌃", with: "control")
+            .split(separator: "+")
+            .map(String.init)
+        guard let key = parts.last,
+              let keyCode = keyCodes[key] else { return nil }
+
+        var modifiers: UInt32 = 0
+        for modifier in parts.dropLast() {
+            switch modifier {
+            case "cmd", "command": modifiers |= UInt32(cmdKey)
+            case "opt", "option", "alt": modifiers |= UInt32(optionKey)
+            case "ctrl", "control": modifiers |= UInt32(controlKey)
+            case "shift": modifiers |= UInt32(shiftKey)
+            default: break
+            }
+        }
+        guard modifiers != 0 else { return nil }
+        return (UInt32(keyCode), modifiers)
+    }
+
+    private static let keyCodes: [String: Int] = [
+        "space": kVK_Space,
+        "return": kVK_Return,
+        "enter": kVK_Return,
+        "escape": kVK_Escape,
+        "esc": kVK_Escape,
+        "a": kVK_ANSI_A,
+        "b": kVK_ANSI_B,
+        "c": kVK_ANSI_C,
+        "d": kVK_ANSI_D,
+        "e": kVK_ANSI_E,
+        "f": kVK_ANSI_F,
+        "g": kVK_ANSI_G,
+        "h": kVK_ANSI_H,
+        "i": kVK_ANSI_I,
+        "j": kVK_ANSI_J,
+        "k": kVK_ANSI_K,
+        "l": kVK_ANSI_L,
+        "m": kVK_ANSI_M,
+        "n": kVK_ANSI_N,
+        "o": kVK_ANSI_O,
+        "p": kVK_ANSI_P,
+        "q": kVK_ANSI_Q,
+        "r": kVK_ANSI_R,
+        "s": kVK_ANSI_S,
+        "t": kVK_ANSI_T,
+        "u": kVK_ANSI_U,
+        "v": kVK_ANSI_V,
+        "w": kVK_ANSI_W,
+        "x": kVK_ANSI_X,
+        "y": kVK_ANSI_Y,
+        "z": kVK_ANSI_Z,
+        "0": kVK_ANSI_0,
+        "1": kVK_ANSI_1,
+        "2": kVK_ANSI_2,
+        "3": kVK_ANSI_3,
+        "4": kVK_ANSI_4,
+        "5": kVK_ANSI_5,
+        "6": kVK_ANSI_6,
+        "7": kVK_ANSI_7,
+        "8": kVK_ANSI_8,
+        "9": kVK_ANSI_9
+    ]
+}
+
+private extension UInt32 {
+    init(ascii value: String) {
+        self = value.utf8.reduce(0) { ($0 << 8) + UInt32($1) }
     }
 }
 

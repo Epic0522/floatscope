@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "conversationRoot": "~/Documents/FloatScope Conversations",
+  "agents": [
+    {
+      "id": "agent1",
+      "kind": "codex-app-server",
+      "displayName": "Agent 1",
+      "color": "#FF6FB7",
+      "executablePath": "",
+      "model": "gpt-5.4-mini",
+      "effort": "medium",
+      "models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "o3", "o4-mini"],
+      "efforts": ["low", "medium", "high", "xhigh"]
+    },
+    {
+      "id": "agent2",
+      "kind": "opencode-run",
+      "displayName": "Agent 2",
+      "color": "#A85BFF",
+      "executablePath": "",
+      "model": "opencode/deepseek-v4-flash-free",
+      "variant": "auto",
+      "models": [
+        "opencode/big-pickle",
+        "opencode/deepseek-v4-flash-free",
+        "opencode/mimo-v2.5-free",
+        "opencode/nemotron-3-super-free",
+        "google/gemini-3.1-flash-lite",
+        "google/gemini-3.1-pro-preview-customtools",
+        "google/gemini-3.5-flash",
+        "google/gemma-4-26b-a4b-it",
+        "google/gemma-4-31b-it",
+        "openrouter/~anthropic/claude-haiku-latest",
+        "openrouter/~anthropic/claude-sonnet-latest",
+        "openrouter/~anthropic/claude-opus-latest",
+        "openrouter/~openai/gpt-latest",
+        "openrouter/~openai/gpt-mini-latest",
+        "openrouter/deepseek/deepseek-r1",
+        "openrouter/deepseek/deepseek-v3.2"
+      ],
+      "variants": ["auto", "minimal", "low", "medium", "high", "max"]
+    }
+  ]
+}

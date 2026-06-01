@@ -1,0 +1,17 @@
+.DS_Store
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Local runtime data
+floatscope对话历史/
+FloatScope Conversations/
+transcript.json
+attachments/
+screen-*.png
+paste-*.png
+
+# Local config copies
+agents.local.json
+*.local.json

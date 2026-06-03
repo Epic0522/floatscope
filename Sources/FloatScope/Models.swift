@@ -1,6 +1,18 @@
 import Foundation
 import SwiftUI
 
+enum RuntimePaths {
+    static var applicationSupportDirectory: URL {
+        let directoryName = Bundle.main.bundleIdentifier == "local.floatscope.preview"
+            ? "FloatScope Preview"
+            : "FloatScope"
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library")
+            .appendingPathComponent("Application Support")
+            .appendingPathComponent(directoryName, isDirectory: true)
+    }
+}
+
 struct AgentHubConfig: Codable, Sendable {
     var version: Int
     var conversationRoot: String
@@ -13,6 +25,7 @@ struct AgentRuntimeConfig: Codable, Identifiable, Sendable, Equatable {
     var displayName: String
     var color: String
     var executablePath: String
+    var appBundlePath: String?
     var model: String?
     var effort: String?
     var variant: String?
@@ -23,10 +36,7 @@ struct AgentRuntimeConfig: Codable, Identifiable, Sendable, Equatable {
 
 enum AgentHubConfigStore {
     static var configURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Application Support")
-            .appendingPathComponent("FloatScope")
+        RuntimePaths.applicationSupportDirectory
             .appendingPathComponent("agents.json")
     }
 
@@ -74,6 +84,7 @@ enum AgentHubConfigStore {
             displayName: "Agent \(index)",
             color: "#8E8E93",
             executablePath: "",
+            appBundlePath: nil,
             model: nil,
             effort: nil,
             variant: nil,
@@ -95,7 +106,7 @@ enum AgentHubConfigStore {
         var migrated = config
         migrated.agents = migrated.agents.enumerated().map { index, agent in
             var normalized = agent
-            if normalized.kind == "codex-app-server" || index == 0 {
+            if normalized.kind == "codex-app-server" || normalized.kind == "codex-cli-resume" || normalized.kind == "codex-auto" || index == 0 {
                 normalized.efforts = ReasoningEffortPreset.allCases.map(\.rawValue)
                 if normalized.effort == "minimal" || normalized.effort == "none" || normalized.effort == nil {
                     normalized.effort = "low"
@@ -109,16 +120,18 @@ enum AgentHubConfigStore {
     static let defaultConfig = AgentHubConfig(
         version: 1,
         conversationRoot: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents")
             .appendingPathComponent("FloatScope Conversations")
             .path,
         agents: [
             AgentRuntimeConfig(
                 id: "agent1",
                 kind: "codex-app-server",
-                displayName: "agent1",
+                displayName: "Agent 1",
                 color: "#FF6FB7",
-                executablePath: "/opt/homebrew/bin/codex",
-                model: "gpt-5.5",
+                executablePath: "",
+                appBundlePath: nil,
+                model: "gpt-5.4-mini",
                 effort: "medium",
                 variant: nil,
                 models: CodexModelPreset.allCases.map(\.codexModel),
@@ -128,9 +141,10 @@ enum AgentHubConfigStore {
             AgentRuntimeConfig(
                 id: "agent2",
                 kind: "opencode-run",
-                displayName: "agent2",
+                displayName: "Agent 2",
                 color: "#A85BFF",
-                executablePath: "/opt/homebrew/bin/opencode",
+                executablePath: "",
+                appBundlePath: nil,
                 model: OpenCodeModelPreset.deepSeekV4FlashFree.modelIdentifier,
                 effort: nil,
                 variant: "auto",
@@ -456,10 +470,7 @@ enum TranscriptStore {
     }
 
     static var transcriptURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Application Support")
-            .appendingPathComponent("FloatScope")
+        RuntimePaths.applicationSupportDirectory
             .appendingPathComponent("transcript.json")
     }
 
@@ -468,7 +479,7 @@ enum TranscriptStore {
               let stored = try? decoder.decode([StoredMessage].self, from: data) else {
             return []
         }
-        return stored.compactMap { item in
+        let messages = stored.compactMap { item -> ChatMessage? in
             let role: MessageRole
             switch item.role {
             case "user":
@@ -482,6 +493,7 @@ enum TranscriptStore {
             }
             return ChatMessage(id: item.id, role: role, text: item.text, attachments: item.attachments ?? [], createdAt: item.createdAt)
         }
+        return dedupeConsecutiveUserMessages(messages)
     }
 
     static func save(_ messages: [ChatMessage]) {
@@ -507,6 +519,60 @@ enum TranscriptStore {
 
     static func clear() {
         try? FileManager.default.removeItem(at: transcriptURL)
+    }
+
+    private static func dedupeConsecutiveUserMessages(_ messages: [ChatMessage]) -> [ChatMessage] {
+        var result: [ChatMessage] = []
+        for message in messages {
+            if case .user = message.role,
+               let previous = result.last,
+               case .user = previous.role,
+               normalizedUserText(previous.text) == normalizedUserText(message.text),
+               attachmentFingerprint(previous.attachments) == attachmentFingerprint(message.attachments) {
+                continue
+            }
+            result.append(message)
+        }
+        return result
+    }
+
+    private static func normalizedUserText(_ text: String) -> String {
+        var trimmed = text
+            .replacingOccurrences(
+                of: #"(?s)\n?\s*---\s*\n\[Group context\].*?\[/Group context\]\s*"#,
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?s)\n?\s*<!--\s*FloatScope group context.*?-->\s*"#,
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let pairs: [(Character, Character)] = [
+            ("\"", "\""),
+            ("“", "”"),
+            ("「", "」"),
+            ("『", "』")
+        ]
+        for (open, close) in pairs where trimmed.first == open && trimmed.last == close {
+            trimmed.removeFirst()
+            trimmed.removeLast()
+            return trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
+    private static func attachmentFingerprint(_ attachments: [ChatAttachment]) -> String {
+        attachments
+            .map { attachment in
+                let stablePath = URL(fileURLWithPath: attachment.path).standardizedFileURL.path
+                return "\(stablePath)|\(attachment.filename)|\(attachment.mimeType ?? "")"
+            }
+            .sorted()
+            .joined(separator: "\n")
     }
 
     private static var encoder: JSONEncoder {
@@ -549,6 +615,7 @@ struct SettingsKeys {
     static let toggleShortcut = "FloatScope.toggleShortcut"
     static let screenReplayCacheEnabled = "FloatScope.screenReplayCacheEnabled"
     static let appLanguage = "FloatScope.appLanguage"
+    static let autoCollapseAfterReply = "FloatScope.autoCollapseAfterReply"
 }
 
 enum AppLanguage: String, CaseIterable, Identifiable {
@@ -626,6 +693,7 @@ enum L10n {
         case screenReplayCache
         case opacity
         case watchInterval
+        case autoCollapse
         case seconds
         case cancel
         case apply
@@ -641,6 +709,7 @@ enum L10n {
         case resetPosition
         case conversationHistoryMenu
         case newConversation
+        case compressContext
         case toggleScreenWatch
         case settings
         case quit
@@ -650,8 +719,6 @@ enum L10n {
         case newConversationStarted
         case screenWatchStopped
         case screenWatchStarted
-        case watchRandomHint
-        case watchFixedHint
         case switched
         case unknownAgent
         case capturedScreen
@@ -660,6 +727,10 @@ enum L10n {
         case attachmentPrompt
         case currentMessageAttachments
         case earlierGroupContextTruncated
+        case contextLimitWarningTitle
+        case contextLimitWarningBody
+        case contextCompressionPrompt
+        case contextCompressionRequested
         case sessionStarted
 
         var en: String {
@@ -702,6 +773,7 @@ enum L10n {
             case .screenReplayCache: "Screen Replay Cache"
             case .opacity: "Opacity"
             case .watchInterval: "Watch Interval"
+            case .autoCollapse: "Auto Collapse"
             case .seconds: "Seconds"
             case .cancel: "Cancel"
             case .apply: "Apply"
@@ -717,6 +789,7 @@ enum L10n {
             case .resetPosition: "Reset Position"
             case .conversationHistoryMenu: "Conversation History..."
             case .newConversation: "New Conversation"
+            case .compressContext: "Compress Context"
             case .toggleScreenWatch: "Toggle Screen Watch"
             case .settings: "Settings..."
             case .quit: "Quit FloatScope"
@@ -726,8 +799,6 @@ enum L10n {
             case .newConversationStarted: "Started a new FloatScope conversation."
             case .screenWatchStopped: "Screen watch stopped."
             case .screenWatchStarted: "Screen watch started."
-            case .watchRandomHint: "Use the status bar screen-watch controls."
-            case .watchFixedHint: "Use the status bar screen-watch controls."
             case .switched: "Switched."
             case .unknownAgent: "Unknown agent"
             case .capturedScreen: "Captured screen"
@@ -736,6 +807,10 @@ enum L10n {
             case .attachmentPrompt: "Please review these attachments."
             case .currentMessageAttachments: "Current message attachments"
             case .earlierGroupContextTruncated: "earlier group context truncated"
+            case .contextLimitWarningTitle: "FloatScope context is getting long"
+            case .contextLimitWarningBody: "Consider compressing the current conversation from the menu bar."
+            case .contextCompressionPrompt: "Please summarize the current conversation into a compact continuation note. Keep durable facts, active tasks, decisions, open bugs, and the latest user preferences. Do not restate hidden group context."
+            case .contextCompressionRequested: "Context compression requested."
             case .sessionStarted: "session started."
             }
         }
@@ -780,6 +855,7 @@ enum L10n {
             case .screenReplayCache: "屏幕回放缓存"
             case .opacity: "透明度"
             case .watchInterval: "读屏间隔"
+            case .autoCollapse: "自动收回"
             case .seconds: "秒"
             case .cancel: "取消"
             case .apply: "应用"
@@ -795,6 +871,7 @@ enum L10n {
             case .resetPosition: "重置位置"
             case .conversationHistoryMenu: "聊天记录..."
             case .newConversation: "新建对话"
+            case .compressContext: "压缩上下文"
             case .toggleScreenWatch: "切换定时读屏"
             case .settings: "设置..."
             case .quit: "退出 FloatScope"
@@ -804,8 +881,6 @@ enum L10n {
             case .newConversationStarted: "已开启新的 FloatScope 对话。"
             case .screenWatchStopped: "已停止读屏。"
             case .screenWatchStarted: "已开始读屏。"
-            case .watchRandomHint: "请使用状态栏里的定时读屏开关。"
-            case .watchFixedHint: "请使用状态栏里的定时读屏开关。"
             case .switched: "已切换。"
             case .unknownAgent: "未知 Agent"
             case .capturedScreen: "已截屏"
@@ -814,6 +889,10 @@ enum L10n {
             case .attachmentPrompt: "请看这些附件。"
             case .currentMessageAttachments: "当前消息附件"
             case .earlierGroupContextTruncated: "更早的群聊上下文已截断"
+            case .contextLimitWarningTitle: "FloatScope 上下文变长了"
+            case .contextLimitWarningBody: "可以从状态栏菜单压缩当前对话。"
+            case .contextCompressionPrompt: "请把当前对话总结成一份紧凑的续聊上下文。保留长期事实、当前任务、已做决定、未解决问题和最新用户偏好。不要复述隐藏的群聊上下文。"
+            case .contextCompressionRequested: "已请求压缩上下文。"
             case .sessionStarted: "会话已启动。"
             }
         }
@@ -839,7 +918,7 @@ struct FloatScopeSettings {
     var primaryDisplayName: String {
         get {
             let stored = UserDefaults.standard.string(forKey: SettingsKeys.primaryDisplayName)
-            return stored == "Primary" ? "agent1" : (stored ?? AgentHubConfigStore.agent(at: 0).displayName)
+            return stored ?? AgentHubConfigStore.agent(at: 0).displayName
         }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.primaryDisplayName) }
     }
@@ -847,7 +926,7 @@ struct FloatScopeSettings {
     var secondaryDisplayName: String {
         get {
             let stored = UserDefaults.standard.string(forKey: SettingsKeys.secondaryDisplayName)
-            return stored == "Secondary" ? "agent2" : (stored ?? AgentHubConfigStore.agent(at: 1).displayName)
+            return stored ?? AgentHubConfigStore.agent(at: 1).displayName
         }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.secondaryDisplayName) }
     }
@@ -910,6 +989,14 @@ struct FloatScopeSettings {
             return stored == 0 ? 60 : stored
         }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKeys.watchDefaultInterval) }
+    }
+
+    var autoCollapseAfterReply: TimeInterval {
+        get {
+            let stored = UserDefaults.standard.object(forKey: SettingsKeys.autoCollapseAfterReply) as? Double
+            return stored ?? 8
+        }
+        set { UserDefaults.standard.set(max(0, newValue), forKey: SettingsKeys.autoCollapseAfterReply) }
     }
 
     var showSystemMessages: Bool {

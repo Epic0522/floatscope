@@ -30,6 +30,8 @@ final class FloatScopeModel: ObservableObject {
     private let screenWatcher = ScreenWatcher()
     private var scheduler: WatchScheduler?
     private var currentAgentResponse: [String: UUID] = [:]
+    private var didWarnContextLimit = false
+    private var autoCollapseTask: Task<Void, Never>?
 
     init() {
         AgentHubConfigStore.ensureUserConfig()
@@ -81,7 +83,7 @@ final class FloatScopeModel: ObservableObject {
         inputText = ""
         showLongInputEditor = false
         pendingAttachments.removeAll()
-        expand()
+        collapse()
 
         if isScreenCue(trimmed) {
             sendWithFreshScreenCapture(prompt: trimmed)
@@ -99,7 +101,7 @@ final class FloatScopeModel: ObservableObject {
         for agent in agents {
             currentAgentResponse[agent] = nil
             moods[agent] = .thinking
-            bridge.send(agent: agent, message: outboundMessage(message, groupAgents: agents), attachments: attachments, codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
+            bridge.send(agent: agent, message: outboundMessage(message, groupAgents: agents, targetAgent: agent), attachments: attachments, codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
         }
     }
 
@@ -231,6 +233,16 @@ final class FloatScopeModel: ObservableObject {
         showSettings = false
     }
 
+    func setCodexLaunchMode(_ kind: String) {
+        guard ["codex-app-server", "codex-cli-resume"].contains(kind),
+              let id = agentConfigs.first?.id,
+              let index = agentConfigs.firstIndex(where: { $0.id == id }) else { return }
+        agentConfigs[index].kind = kind
+        AgentHubConfigStore.save(AgentHubConfig(version: 1, conversationRoot: settings.conversationRoot, agents: agentConfigs))
+        bridge.configure(config: AgentHubConfig(version: 1, conversationRoot: settings.conversationRoot, agents: agentConfigs))
+        bridge.startAll()
+    }
+
     func addAgentConfig() {
         var nextIndex = agentConfigs.count + 1
         var agent = AgentHubConfigStore.makeAgent(index: nextIndex)
@@ -279,9 +291,30 @@ final class FloatScopeModel: ObservableObject {
         bridge.startNewConversation(group: isGroupAgentID(selectedAgentID))
         currentAgentResponse.removeAll()
         pendingResponseAgents.removeAll()
+        autoCollapseTask?.cancel()
+        autoCollapseTask = nil
+        didWarnContextLimit = false
         messages.removeAll()
         TranscriptStore.clear()
         appendSystem(L10n.text(.newConversationStarted, language: settings.appLanguage))
+        expand()
+    }
+
+    func requestContextCompression() {
+        let agents = resolveAgentIDs(for: "")
+        guard !agents.isEmpty else { return }
+        if isGroupAgentID(selectedAgentID), agents.count > 1 {
+            bridge.prepareGroupConversationIfNeeded()
+        }
+
+        let prompt = L10n.text(.contextCompressionPrompt, language: settings.appLanguage)
+        pendingResponseAgents.formUnion(agents)
+        for agent in agents {
+            currentAgentResponse[agent] = nil
+            moods[agent] = .thinking
+            bridge.send(agent: agent, message: outboundMessage(prompt, groupAgents: agents, targetAgent: agent, currentMessageAlreadyAppended: false), attachments: [], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
+        }
+        appendSystem(L10n.text(.contextCompressionRequested, language: settings.appLanguage))
         expand()
     }
 
@@ -333,6 +366,7 @@ final class FloatScopeModel: ObservableObject {
             UserDefaults.standard.set(selectedAgentID, forKey: SettingsKeys.selectedAgentID)
         }
         messages.removeAll()
+        didWarnContextLimit = false
         TranscriptStore.clear()
         isLoadingHistory = true
         showHistory = false
@@ -344,6 +378,7 @@ final class FloatScopeModel: ObservableObject {
                 self.trimMessages()
                 self.saveTranscript()
                 self.isLoadingHistory = false
+                self.checkContextBudget()
             }
         }
     }
@@ -363,6 +398,8 @@ final class FloatScopeModel: ObservableObject {
 
     func expand() {
         guard !isExpanded else { return }
+        autoCollapseTask?.cancel()
+        autoCollapseTask = nil
         isExpanded = true
         onExpansionChanged?(true)
     }
@@ -370,11 +407,15 @@ final class FloatScopeModel: ObservableObject {
     func collapse() {
         guard !showSettings else { return }
         guard isExpanded else { return }
+        autoCollapseTask?.cancel()
+        autoCollapseTask = nil
         isExpanded = false
         onExpansionChanged?(false)
     }
 
     func toggleExpanded() {
+        autoCollapseTask?.cancel()
+        autoCollapseTask = nil
         isExpanded.toggle()
         onExpansionChanged?(isExpanded)
     }
@@ -441,6 +482,7 @@ final class FloatScopeModel: ObservableObject {
         if isGroupAgentID(selectedAgentID), agents.count > 1 {
             bridge.prepareGroupConversationIfNeeded()
         }
+        collapse()
         appendUser(prompt)
         pendingResponseAgents.formUnion(agents)
         for agent in agents {
@@ -457,7 +499,7 @@ final class FloatScopeModel: ObservableObject {
                     saveTranscript()
                 }
                 for agent in agents {
-                    bridge.send(agent: agent, message: outboundMessage(prompt, groupAgents: agents), attachments: [stableURL], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
+                    bridge.send(agent: agent, message: outboundMessage(prompt, groupAgents: agents, targetAgent: agent), attachments: [stableURL], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
                 }
                 appendSystem("\(L10n.text(.capturedScreen, language: settings.appLanguage)): \(url.lastPathComponent)")
                 for agent in agents {
@@ -486,7 +528,7 @@ final class FloatScopeModel: ObservableObject {
                 moods[agent] = .watching
                 currentAgentResponse[agent] = nil
                 let message = L10n.text(.watchObservationPrompt, language: settings.appLanguage)
-                bridge.send(agent: agent, message: outboundMessage(message, groupAgents: agents, currentMessageAlreadyAppended: false), attachments: [url], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
+                bridge.send(agent: agent, message: outboundMessage(message, groupAgents: agents, targetAgent: agent, currentMessageAlreadyAppended: false), attachments: [url], codexModelPreset: codexModelPreset, codexEffortPreset: codexEffortPreset, secondaryModelPreset: secondaryModelPreset, secondaryVariantPreset: secondaryVariantPreset)
             }
             appendSystem(L10n.text(.watchCaptureSent, language: settings.appLanguage))
             for agent in agents {
@@ -518,6 +560,9 @@ final class FloatScopeModel: ObservableObject {
         if let matched = agentConfigs.first(where: { lower.contains($0.id.lowercased()) || lower.contains($0.displayName.lowercased()) }) {
             return matched.id
         }
+        if lower.contains("secondary") || text.contains("薇薇安") {
+            return agentConfigs.dropFirst().first?.id ?? agentConfigs.first?.id ?? "agent1"
+        }
         return agentConfigs.first?.id ?? "agent1"
     }
 
@@ -525,12 +570,12 @@ final class FloatScopeModel: ObservableObject {
         id == "group" || id == "auto"
     }
 
-    private func outboundMessage(_ message: String, groupAgents: [String], currentMessageAlreadyAppended: Bool = true) -> String {
+    private func outboundMessage(_ message: String, groupAgents: [String], targetAgent: String, currentMessageAlreadyAppended: Bool = true) -> String {
         guard isGroupAgentID(selectedAgentID), groupAgents.count > 1 else {
             return message
         }
 
-        guard let context = groupContextTranscript(currentMessageAlreadyAppended: currentMessageAlreadyAppended) else {
+        guard let context = groupContextTranscript(targetAgent: targetAgent, currentMessageAlreadyAppended: currentMessageAlreadyAppended) else {
             return message
         }
         let attachmentNote = currentMessageAlreadyAppended ? currentAttachmentNote() : ""
@@ -543,14 +588,17 @@ final class FloatScopeModel: ObservableObject {
         """
     }
 
-    private func groupContextTranscript(currentMessageAlreadyAppended: Bool) -> String? {
+    private func groupContextTranscript(targetAgent: String, currentMessageAlreadyAppended: Bool) -> String? {
         let sourceMessages = currentMessageAlreadyAppended ? Array(messages.dropLast()) : messages
         let recentMessages = sourceMessages
             .filter { message in
                 switch message.role {
                 case .system:
                     return false
-                case .user, .agent:
+                case .user:
+                    return !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !message.attachments.isEmpty
+                case .agent(let agent):
+                    guard agent != targetAgent else { return false }
                     return !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !message.attachments.isEmpty
                 }
             }
@@ -569,14 +617,14 @@ final class FloatScopeModel: ObservableObject {
                 speaker = "System"
             }
 
-            let text = Self.compactedContextText(message.text)
+            let text = Self.normalizedContextText(message.text)
             let attachments = message.attachments.isEmpty
                 ? ""
                 : " [attachments: \(message.attachments.map(\.filename).joined(separator: ", "))]"
             return "\(speaker): \(text)\(attachments)"
         }
 
-        return Self.truncatedContext(lines.joined(separator: "\n"))
+        return Self.rollingContext(lines)
     }
 
     private func currentAttachmentNote() -> String {
@@ -585,19 +633,31 @@ final class FloatScopeModel: ObservableObject {
         return "\n\(L10n.text(.currentMessageAttachments, language: settings.appLanguage)): \(names)"
     }
 
-    private static func compactedContextText(_ text: String) -> String {
-        let normalized = text
+    private static func normalizedContextText(_ text: String) -> String {
+        text
             .replacingOccurrences(of: "\n\n+", with: "\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalized.count > 260 else { return normalized }
-        let index = normalized.index(normalized.startIndex, offsetBy: 260)
-        return String(normalized[..<index]) + "..."
     }
 
-    private static func truncatedContext(_ text: String) -> String {
-        guard text.count > 3_200 else { return text }
-        let index = text.index(text.endIndex, offsetBy: -3_200)
-        return "...[\(L10n.text(.earlierGroupContextTruncated))]\n" + String(text[index...])
+    private static func rollingContext(_ lines: [String]) -> String {
+        let maxCharacters = 8_000
+        var kept: [String] = []
+        var total = 0
+
+        for line in lines.reversed() {
+            let nextTotal = total + line.count + (kept.isEmpty ? 0 : 1)
+            if nextTotal > maxCharacters, !kept.isEmpty {
+                break
+            }
+            kept.append(line)
+            total = nextTotal
+        }
+
+        let ordered = kept.reversed()
+        guard ordered.count < lines.count else {
+            return ordered.joined(separator: "\n")
+        }
+        return "[\(L10n.text(.earlierGroupContextTruncated))]\n" + ordered.joined(separator: "\n")
     }
 
     private func handleBridgeEvent(_ event: AgentBridgeEvent) {
@@ -612,6 +672,9 @@ final class FloatScopeModel: ObservableObject {
         case .completed(let agent):
             pendingResponseAgents.remove(agent)
             moods[agent] = .idle
+            if pendingResponseAgents.isEmpty {
+                scheduleAutoCollapseAfterReply()
+            }
         case .failed(let agent, let message):
             pendingResponseAgents.remove(agent)
             moods[agent] = .error
@@ -627,6 +690,7 @@ final class FloatScopeModel: ObservableObject {
         messages.append(ChatMessage(role: .user, text: text, attachments: attachments.map(Self.chatAttachment)))
         trimMessages()
         saveTranscript()
+        checkContextBudget()
     }
 
     private func appendSystem(_ text: String) {
@@ -651,6 +715,7 @@ final class FloatScopeModel: ObservableObject {
         trimMessages()
         saveTranscript()
         expand()
+        checkContextBudget()
     }
 
     private func trimMessages() {
@@ -661,6 +726,33 @@ final class FloatScopeModel: ObservableObject {
 
     private func saveTranscript() {
         TranscriptStore.save(messages)
+    }
+
+    private func scheduleAutoCollapseAfterReply() {
+        let delay = settings.autoCollapseAfterReply
+        guard delay > 0 else { return }
+        autoCollapseTask?.cancel()
+        autoCollapseTask = Task { [weak self] in
+            let nanoseconds = UInt64(max(0, delay) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            await MainActor.run {
+                guard let self,
+                      self.pendingResponseAgents.isEmpty else { return }
+                self.collapse()
+            }
+        }
+    }
+
+    private func checkContextBudget() {
+        guard !didWarnContextLimit else { return }
+        let estimatedCharacters = messages.reduce(0) { total, message in
+            total + message.text.count + message.attachments.reduce(0) { $0 + $1.filename.count + 24 }
+        }
+        guard estimatedCharacters > 24_000 || messages.count >= 60 else { return }
+        didWarnContextLimit = true
+        let title = L10n.text(.contextLimitWarningTitle, language: settings.appLanguage)
+        let body = L10n.text(.contextLimitWarningBody, language: settings.appLanguage)
+        appendSystem("\(title) \(body)")
     }
 
     private func resetMoodMap() {
@@ -707,10 +799,7 @@ final class FloatScopeModel: ObservableObject {
     }
 
     nonisolated private static func attachmentDirectory() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Application Support")
-            .appendingPathComponent("FloatScope")
+        RuntimePaths.applicationSupportDirectory
             .appendingPathComponent("Attachments", isDirectory: true)
     }
 

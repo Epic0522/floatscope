@@ -60,12 +60,6 @@ struct ContentView: View {
         .padding(8)
         .frame(width: containerWidth, alignment: .leading)
         .frame(height: FloatingPanelMetrics.collapsedHeight, alignment: .center)
-        .sheet(isPresented: $model.showSettings) {
-            SettingsView(model: model)
-        }
-        .sheet(isPresented: $model.showHistory) {
-            HistoryPickerView(model: model)
-        }
         .sheet(isPresented: $model.showLongInputEditor) {
             LongInputEditorView(model: model)
         }
@@ -332,22 +326,28 @@ private struct AgentPickerMenu: View {
                 .padding(.vertical, 6)
 
                 ForEach(model.agentConfigs) { agent in
-                    Button {
-                        model.selectedAgentID = agent.id
-                        UserDefaults.standard.set(agent.id, forKey: SettingsKeys.selectedAgentID)
-                        isPresented = false
-                    } label: {
-                        HStack(spacing: 8) {
-                            Circle().fill(Color(hex: agent.color)).frame(width: 10, height: 10)
-                            Text(agent.displayName)
-                            Spacer()
-                            if agent.id == model.selectedAgentID {
-                                Image(systemName: "checkmark")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button {
+                            model.selectedAgentID = agent.id
+                            UserDefaults.standard.set(agent.id, forKey: SettingsKeys.selectedAgentID)
+                            isPresented = false
+                        } label: {
+                            HStack(spacing: 8) {
+                                Circle().fill(Color(hex: agent.color)).frame(width: 10, height: 10)
+                                Text(agent.displayName)
+                                Spacer()
+                                if agent.id == model.selectedAgentID {
+                                    Image(systemName: "checkmark")
+                                }
                             }
+                            .frame(width: 170, alignment: .leading)
                         }
-                        .frame(width: 170, alignment: .leading)
+                        .buttonStyle(.plain)
+
+                        if agent.id == model.agentConfigs.first?.id {
+                            codexLaunchModeControls(currentKind: agent.kind)
+                        }
                     }
-                    .buttonStyle(.plain)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                 }
@@ -378,6 +378,31 @@ private struct AgentPickerMenu: View {
 
     private var isGroupSelected: Bool {
         model.selectedAgentID == "group" || model.selectedAgentID == "auto"
+    }
+
+    private func codexLaunchModeControls(currentKind: String) -> some View {
+        HStack(spacing: 6) {
+            modeButton(title: "App", kind: "codex-app-server", currentKind: currentKind)
+            modeButton(title: "CLI", kind: "codex-cli-resume", currentKind: currentKind)
+        }
+        .padding(.leading, 18)
+    }
+
+    private func modeButton(title: String, kind: String, currentKind: String) -> some View {
+        Button {
+            model.setCodexLaunchMode(kind)
+            isPresented = false
+        } label: {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background {
+                    Capsule()
+                        .fill(currentKind == kind ? Color.primary.opacity(0.18) : Color.primary.opacity(0.06))
+                }
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -638,8 +663,17 @@ private struct AppKitSingleLineInput: NSViewRepresentable {
 private struct ConversationPanel: View {
     @ObservedObject var model: FloatScopeModel
     private let bottomID = "FloatScopeConversationBottom"
+    private let collapsedRenderLimit = 6
+    private let initialExpandedRenderLimit = 8
+    private let fullRenderLimit = 24
+    @State private var renderLimit = 8
+    @State private var renderRampWorkItem: DispatchWorkItem?
+    @State private var scrollWorkItem: DispatchWorkItem?
+    @State private var isPreparingInitialScroll = true
 
     var body: some View {
+        let visibleMessages = Array(model.messages.suffix(renderLimit))
+
         VStack(alignment: .leading, spacing: 8) {
             if model.isLoadingHistory {
                 HStack {
@@ -661,7 +695,7 @@ private struct ConversationPanel: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(model.messages.suffix(24)) { message in
+                        ForEach(visibleMessages) { message in
                             MessageBubble(
                                 message: message,
                                 visuals: model.settings.visuals,
@@ -677,25 +711,71 @@ private struct ConversationPanel: View {
                             .id(bottomID)
                     }
                 }
+                .defaultScrollAnchor(.bottom)
+                .opacity(isPreparingInitialScroll ? 0.01 : 1)
                 .frame(maxHeight: .infinity)
                 .onAppear {
-                    scrollToBottom(proxy, animated: false)
+                    rampVisibleMessages(proxy)
                 }
                 .onChange(of: model.messages.count) { _, _ in
-                    scrollToBottom(proxy, animated: true)
+                    scheduleScrollToBottom(proxy, animated: false, delay: 0.04)
                 }
                 .onChange(of: model.messages.last?.text ?? "") { _, _ in
-                    scrollToBottom(proxy, animated: true)
+                    scheduleScrollToBottom(proxy, animated: false, delay: 0.12)
+                }
+                .onChange(of: model.isExpanded) { _, expanded in
+                    if expanded {
+                        rampVisibleMessages(proxy)
+                    } else {
+                        renderRampWorkItem?.cancel()
+                        renderLimit = collapsedRenderLimit
+                    }
                 }
                 .onChange(of: model.isLoadingHistory) { _, loading in
                     if !loading {
-                        scrollToBottom(proxy, animated: false)
+                        rampVisibleMessages(proxy)
                     }
                 }
             }
         }
         .padding(14)
         .glassSurface(cornerRadius: 18, material: .hudWindow, strokeOpacity: 0.16)
+    }
+
+    private func rampVisibleMessages(_ proxy: ScrollViewProxy) {
+        renderRampWorkItem?.cancel()
+        isPreparingInitialScroll = true
+        renderLimit = min(initialExpandedRenderLimit, max(initialExpandedRenderLimit, model.messages.count))
+        scrollToBottom(proxy, animated: false)
+        queueScrollToBottom(proxy, delay: 0.02)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+            scrollToBottom(proxy, animated: false)
+            isPreparingInitialScroll = false
+        }
+
+        let workItem = DispatchWorkItem {
+            renderLimit = fullRenderLimit
+            queueScrollToBottom(proxy, delay: 0.02)
+            queueScrollToBottom(proxy, delay: 0.10)
+        }
+        renderRampWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: workItem)
+    }
+
+    private func scheduleScrollToBottom(_ proxy: ScrollViewProxy, animated: Bool, delay: TimeInterval) {
+        scrollWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            scrollToBottom(proxy, animated: animated)
+        }
+        scrollWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func queueScrollToBottom(_ proxy: ScrollViewProxy, delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            scrollToBottom(proxy, animated: false)
+        }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
@@ -764,22 +844,52 @@ private struct MessageBubble: View {
 
 private struct AttachmentPreview: View {
     let attachment: ChatAttachment
+    @State private var image: NSImage?
+    @State private var didAttemptLoad = false
 
     var body: some View {
-        if attachment.isImage, let image = NSImage(contentsOf: attachment.url) {
-            Image(nsImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: 220, maxHeight: 150, alignment: .leading)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay {
+        if attachment.isImage {
+            Group {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                        .fill(.white.opacity(0.12))
+                        .overlay {
+                            ProgressView()
+                                .controlSize(.small)
+                                .opacity(didAttemptLoad ? 0 : 1)
+                        }
                 }
+            }
+            .frame(maxWidth: 220, maxHeight: 150, alignment: .leading)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+            }
+            .task(id: attachment.url) {
+                await loadImage()
+            }
         } else {
             Label(attachment.filename, systemImage: "doc")
                 .font(.caption)
                 .lineLimit(1)
+        }
+    }
+
+    private func loadImage() async {
+        guard image == nil else { return }
+        let url = attachment.url
+        let data = await Task.detached(priority: .utility) {
+            try? Data(contentsOf: url)
+        }.value
+
+        await MainActor.run {
+            didAttemptLoad = true
+            image = data.flatMap(NSImage.init(data:))
         }
     }
 }
@@ -1018,14 +1128,15 @@ private struct ModelPickerMenu: View {
     }
 }
 
-private struct HistoryPickerView: View {
+struct HistoryPickerView: View {
     @ObservedObject var model: FloatScopeModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text(L10n.text(.conversationHistory, language: model.settings.appLanguage))
                     .font(.headline)
+                    .foregroundStyle(.primary)
                 Spacer()
                 Button {
                     model.refreshHistory()
@@ -1067,8 +1178,11 @@ private struct HistoryPickerView: View {
                             }
                         }
                     }
-                    .padding(.vertical, 2)
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 2)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
 
             HStack {
@@ -1080,8 +1194,17 @@ private struct HistoryPickerView: View {
         }
         .padding(18)
         .frame(width: 460, height: 520)
-        .onAppear {
-            model.refreshHistory()
+        .background {
+            ZStack {
+                FrostedGlassBackground(material: .hudWindow)
+                Color(hex: model.settings.userColorHex).opacity(0.16)
+                Color.black.opacity(0.08)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.white.opacity(0.22), lineWidth: 1)
         }
     }
 }
@@ -1120,7 +1243,11 @@ private struct HistoryRow: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+        }
     }
 
     @ViewBuilder
@@ -1350,7 +1477,7 @@ private struct AppKitTextEditor: NSViewRepresentable {
     }
 }
 
-private struct SettingsView: View {
+struct SettingsView: View {
     @ObservedObject var model: FloatScopeModel
 
     var body: some View {
@@ -1489,6 +1616,17 @@ private struct SettingsView: View {
                 }
 
                 HStack {
+                    Text(L10n.text(.autoCollapse, language: model.settings.appLanguage))
+                    TextField("8", value: Binding(
+                        get: { model.settings.autoCollapseAfterReply },
+                        set: { model.settings.autoCollapseAfterReply = $0 }
+                    ), format: .number)
+                    .frame(width: 80)
+                    Text(L10n.text(.seconds, language: model.settings.appLanguage))
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
                     Spacer()
                     Button(L10n.text(.cancel, language: model.settings.appLanguage)) {
                         model.showSettings = false
@@ -1502,7 +1640,16 @@ private struct SettingsView: View {
             .padding(22)
         }
         .background {
-            FrostedGlassBackground(material: .windowBackground)
+            ZStack {
+                FrostedGlassBackground(material: .hudWindow)
+                Color(hex: model.settings.userColorHex).opacity(0.16)
+                Color.black.opacity(0.08)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.white.opacity(0.22), lineWidth: 1)
         }
         .frame(width: 640, height: 720)
     }
@@ -1569,14 +1716,18 @@ private struct AgentConfigCard: View {
                 TextField("Agent Name", text: $config.displayName)
             }
             row(L10n.text(.kind, language: language)) {
-                Picker("", selection: $config.kind) {
-                    Text("Codex App Server").tag("codex-app-server")
-                    Text("OpenCode Run").tag("opencode-run")
-                    Text("Generic CLI").tag("generic-cli")
-                    Text("Claude Code").tag("claude-code")
-                    Text("OpenClaw").tag("openclaw")
+                if config.kind.hasPrefix("codex-") {
+                    Text(config.kind == "codex-cli-resume" ? "Codex Lightweight CLI" : "Codex App Server")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("", selection: $config.kind) {
+                        Text("OpenCode Run").tag("opencode-run")
+                        Text("Generic CLI").tag("generic-cli")
+                        Text("Claude Code").tag("claude-code")
+                        Text("OpenClaw").tag("openclaw")
+                    }
+                    .labelsHidden()
                 }
-                .labelsHidden()
             }
             row(L10n.text(.color, language: language)) {
                 HStack {
@@ -1588,6 +1739,12 @@ private struct AgentConfigCard: View {
             }
             row(L10n.text(.executable, language: language)) {
                 TextField("/path/to/cli", text: $config.executablePath)
+            }
+            row("App") {
+                TextField("/Applications/App.app", text: Binding(
+                    get: { config.appBundlePath ?? "" },
+                    set: { config.appBundlePath = $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+                ))
             }
             row(L10n.text(.model, language: language)) {
                 if let models = config.models, !models.isEmpty {

@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import Combine
 import Darwin
 import SwiftUI
 
@@ -22,9 +23,12 @@ struct FloatScopeApp {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var panel: FloatingPanel?
     private var conversationPanel: ConversationFloatingPanel?
+    private var historyPanel: HistoryFloatingPanel?
+    private var settingsPanel: SettingsFloatingPanel?
     private var model: FloatScopeModel?
     private var statusItem: NSStatusItem?
     private var signalSources: [DispatchSourceSignal] = []
+    private var cancellables: Set<AnyCancellable> = []
     private let hotKeyManager = GlobalHotKeyManager()
     private var conversationFollowTarget: NSRect?
     private var conversationFollowTimer: Timer?
@@ -57,6 +61,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.onExpansionChanged = { [weak self] expanded in
             self?.setConversationVisible(expanded)
         }
+
+        model.$showHistory
+            .removeDuplicates()
+            .sink { [weak self] visible in
+                if visible {
+                    self?.showHistoryPanel()
+                } else {
+                    self?.hideHistoryPanel()
+                }
+            }
+            .store(in: &cancellables)
+
+        model.$showSettings
+            .removeDuplicates()
+            .sink { [weak self] visible in
+                if visible {
+                    self?.showSettingsPanel()
+                } else {
+                    self?.hideSettingsPanel()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -92,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(NSMenuItem(title: L10n.text(.resetPosition, language: language), action: #selector(resetPosition), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: L10n.text(.conversationHistoryMenu, language: language), action: #selector(openHistory), keyEquivalent: "h"))
         menu.addItem(NSMenuItem(title: L10n.text(.newConversation, language: language), action: #selector(newConversation), keyEquivalent: "n"))
+        menu.addItem(NSMenuItem(title: L10n.text(.compressContext, language: language), action: #selector(compressContext), keyEquivalent: "k"))
         menu.addItem(NSMenuItem(title: L10n.text(.toggleScreenWatch, language: language), action: #selector(toggleScreenWatch), keyEquivalent: "w"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: L10n.text(.settings, language: language), action: #selector(openSettings), keyEquivalent: ","))
@@ -106,23 +133,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func openFloatScope() {
         if panel?.isVisible == true {
+            model?.collapse()
             panel?.orderOut(nil)
             conversationPanel?.orderOut(nil)
             return
         }
+        model?.collapse()
         panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        model?.expand()
     }
 
     @objc private func openSettings() {
-        panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         model?.showSettings = true
     }
 
     @objc private func openHistory() {
-        panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         model?.openHistoryPicker()
     }
@@ -131,6 +157,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         model?.startNewConversation()
+    }
+
+    @objc private func compressContext() {
+        panel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        model?.requestContextCompression()
     }
 
     @objc private func toggleScreenWatch() {
@@ -283,16 +315,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    private func showHistoryPanel() {
+        guard let model else { return }
+        if historyPanel == nil {
+            let size = NSSize(width: 460, height: 520)
+            let frame = statusAnchoredFrame(size: size)
+            let panel = HistoryFloatingPanel(contentRect: frame)
+            panel.contentView = RoundedHostingContainer(rootView: HistoryPickerView(model: model), radius: 18)
+            historyPanel = panel
+        }
+
+        historyPanel?.setFrame(statusAnchoredFrame(size: historyPanel?.frame.size ?? NSSize(width: 460, height: 520)), display: true, animate: false)
+        historyPanel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func hideHistoryPanel() {
+        historyPanel?.orderOut(nil)
+    }
+
+    private func showSettingsPanel() {
+        guard let model else { return }
+        if settingsPanel == nil {
+            let size = NSSize(width: 640, height: 720)
+            let panel = SettingsFloatingPanel(contentRect: statusAnchoredFrame(size: size))
+            panel.contentView = RoundedHostingContainer(rootView: SettingsView(model: model), radius: 18)
+            settingsPanel = panel
+        }
+
+        settingsPanel?.setFrame(statusAnchoredFrame(size: settingsPanel?.frame.size ?? NSSize(width: 640, height: 720)), display: true, animate: false)
+        settingsPanel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func hideSettingsPanel() {
+        settingsPanel?.orderOut(nil)
+    }
+
+    private func statusAnchoredFrame(size: NSSize) -> NSRect {
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let buttonFrame = statusItem?.button?.window?.convertToScreen(statusItem?.button?.bounds ?? .zero)
+        let anchor = buttonFrame ?? NSRect(x: screenFrame.maxX - 32, y: screenFrame.maxY - 24, width: 24, height: 24)
+        let x = min(max(anchor.midX - size.width / 2, screenFrame.minX + 12), screenFrame.maxX - size.width - 12)
+        let y = min(max(anchor.minY - size.height - 10, screenFrame.minY + 12), screenFrame.maxY - size.height - 12)
+        return NSRect(x: x, y: y, width: size.width, height: size.height)
+    }
+
     private func setConversationVisible(_ visible: Bool) {
         guard let conversationPanel else { return }
         repositionConversationPanel()
         conversationPanel.forceRoundedLayout()
         let transitionSurface = conversationPanel.contentView as? PanelTransitionSurface
         if visible {
-            conversationPanel.alphaValue = 1
             transitionSurface?.prepareForAppear()
+            conversationPanel.alphaValue = 1
             conversationPanel.orderFrontRegardless()
-            transitionSurface?.animateVisible(duration: 0.24)
+            DispatchQueue.main.async {
+                transitionSurface?.animateVisible(duration: 0.22)
+            }
         } else {
             transitionSurface?.animateHidden(duration: 0.24)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
@@ -358,6 +438,76 @@ final class ConversationFloatingPanel: NSPanel {
         if !isTrackingParentMove {
             forceRoundedLayout()
         }
+    }
+}
+
+final class HistoryFloatingPanel: NSPanel {
+    override var contentView: NSView? {
+        didSet { forceRoundedLayout() }
+    }
+
+    init(contentRect: NSRect) {
+        super.init(
+            contentRect: contentRect,
+            styleMask: [.borderless, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        isFloatingPanel = true
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = true
+        hidesOnDeactivate = false
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        minSize = NSSize(width: 360, height: 360)
+        maxSize = NSSize(width: 640, height: 720)
+        forceRoundedLayout()
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool, animate animateFlag: Bool) {
+        super.setFrame(frameRect, display: flag, animate: animateFlag)
+        forceRoundedLayout()
+    }
+}
+
+final class SettingsFloatingPanel: NSPanel {
+    override var contentView: NSView? {
+        didSet { forceRoundedLayout() }
+    }
+
+    init(contentRect: NSRect) {
+        super.init(
+            contentRect: contentRect,
+            styleMask: [.borderless, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        isFloatingPanel = true
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = true
+        hidesOnDeactivate = false
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        minSize = NSSize(width: 520, height: 520)
+        maxSize = NSSize(width: 760, height: 820)
+        forceRoundedLayout()
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool, animate animateFlag: Bool) {
+        super.setFrame(frameRect, display: flag, animate: animateFlag)
+        forceRoundedLayout()
     }
 }
 

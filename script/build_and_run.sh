@@ -3,6 +3,7 @@ set -euo pipefail
 
 APP_NAME="FloatScope"
 BUNDLE_ID="local.floatscope.app"
+APP_DISPLAY_NAME="$APP_NAME"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_CONFIG="${BUILD_CONFIG:-release}"
 EXECUTABLE_PATH="$ROOT_DIR/.build/$BUILD_CONFIG/$APP_NAME"
@@ -13,12 +14,14 @@ RESOURCES_PATH="$CONTENTS_PATH/Resources"
 
 VERIFY=0
 LAUNCH=1
+PREVIEW=0
 
 for arg in "$@"; do
   case "$arg" in
     --verify) VERIFY=1 ;;
     --no-launch) LAUNCH=0 ;;
     --debug) BUILD_CONFIG="debug" ;;
+    --preview) PREVIEW=1 ;;
     *)
       echo "Unknown option: $arg" >&2
       exit 2
@@ -26,13 +29,29 @@ for arg in "$@"; do
   esac
 done
 
+if ((PREVIEW == 1)); then
+  BUNDLE_ID="local.floatscope.preview"
+  APP_DISPLAY_NAME="FloatScope Preview"
+  BUNDLE_PATH="$ROOT_DIR/dist/$APP_DISPLAY_NAME.app"
+  CONTENTS_PATH="$BUNDLE_PATH/Contents"
+  MACOS_PATH="$CONTENTS_PATH/MacOS"
+  RESOURCES_PATH="$CONTENTS_PATH/Resources"
+fi
+
 EXECUTABLE_PATH="$ROOT_DIR/.build/$BUILD_CONFIG/$APP_NAME"
 
 cd "$ROOT_DIR"
 
-if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
-  pkill -x "$APP_NAME" || true
-  sleep 0.2
+if ((LAUNCH == 1 && PREVIEW == 0)); then
+  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+    pkill -x "$APP_NAME" || true
+    sleep 0.5
+  fi
+
+  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+    pkill -9 -x "$APP_NAME" || true
+    sleep 0.2
+  fi
 fi
 
 swift build -c "$BUILD_CONFIG"
@@ -55,7 +74,7 @@ cat > "$CONTENTS_PATH/Info.plist" <<PLIST
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>$APP_NAME</string>
+  <string>$APP_DISPLAY_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -82,10 +101,10 @@ fi
 
 if [[ "$VERIFY" == "1" ]]; then
   sleep 1
-  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+  if pgrep -f "$BUNDLE_PATH/Contents/MacOS/$APP_NAME" >/dev/null 2>&1; then
     echo "$BUNDLE_PATH"
   else
-    echo "Launch verification failed: $APP_NAME is not running." >&2
+    echo "Launch verification failed: $BUNDLE_PATH is not running." >&2
     exit 1
   fi
 else

@@ -7,18 +7,32 @@ enum AgentBridgeEvent {
     case failed(String, String)
 }
 
+private protocol CodexSessionControlling: AnyObject {
+    var agentID: String { get }
+    var onEvent: ((AgentBridgeEvent) -> Void)? { get set }
+
+    func start()
+    func send(message: String, attachments: [URL], modelPreset: CodexModelPreset, effortPreset: ReasoningEffortPreset)
+    func stop()
+    func resetConversation()
+    func rollbackLastTurns(_ count: Int)
+    func selectConversation(threadID: String?, title: String)
+}
+
 final class AgentBridge: @unchecked Sendable {
     var onEvent: ((AgentBridgeEvent) -> Void)?
 
-    private var codex: CodexAppServerSession?
+    private var codex: CodexSessionControlling?
     private var opencode: OpencodeRunSession?
     private var genericSessions: [String: GenericCLISession] = [:]
     private var configs: [String: AgentRuntimeConfig] = [:]
+    private var codexUsesCLI = false
 
     func configure(config: AgentHubConfig) {
         stopAll()
         genericSessions.removeAll()
         configs = [:]
+        codexUsesCLI = false
         for agent in config.agents {
             configs[agent.id] = agent
         }
@@ -31,11 +45,16 @@ final class AgentBridge: @unchecked Sendable {
         for (index, agent) in config.agents.enumerated() {
             switch agent.kind {
             case "codex-app-server" where index == 0:
-                let session = CodexAppServerSession(agentID: agent.id, executablePath: agent.executablePath, context: ConversationContext(rootPath: visibleRoot))
+                let session = CodexAppServerSession(agentID: agent.id, executablePath: agent.executablePath, appBundlePath: agent.appBundlePath, context: ConversationContext(rootPath: visibleRoot))
+                session.onEvent = { [weak self] event in self?.onEvent?(event) }
+                codex = session
+            case "codex-cli-resume" where index == 0:
+                codexUsesCLI = true
+                let session = CodexCLISession(agentID: agent.id, executablePath: agent.executablePath, context: ConversationContext(rootPath: visibleRoot))
                 session.onEvent = { [weak self] event in self?.onEvent?(event) }
                 codex = session
             case "opencode-run" where index == 1:
-                let session = OpencodeRunSession(agentID: agent.id, executablePath: agent.executablePath, context: ConversationContext(rootPath: root))
+                let session = OpencodeRunSession(agentID: agent.id, executablePath: agent.executablePath, appBundlePath: agent.appBundlePath, context: ConversationContext(rootPath: root))
                 session.onEvent = { [weak self] event in self?.onEvent?(event) }
                 opencode = session
             default:
@@ -49,6 +68,7 @@ final class AgentBridge: @unchecked Sendable {
     func configure(codexPath: String, opencodePath: String, conversationRoot: String) {
         codex?.stop()
         opencode?.stop()
+        codexUsesCLI = false
 
         let opencodeRoot = URL(fileURLWithPath: conversationRoot).standardizedFileURL.path
         let visibleRoot = CodexWorkspaceResolver.visibleWorkspaceRoot(preferredRoot: conversationRoot)
@@ -56,8 +76,8 @@ final class AgentBridge: @unchecked Sendable {
         let codexContext = ConversationContext(rootPath: visibleRoot)
         CodexHistoryVisibilityRegistrar.registerWorkspace(workspaceRoot: visibleRoot)
         OpenCodeHistoryVisibilityRegistrar.registerProject(workspaceRoot: opencodeRoot)
-        let codex = CodexAppServerSession(agentID: "agent1", executablePath: codexPath, context: codexContext)
-        let opencode = OpencodeRunSession(agentID: "agent2", executablePath: opencodePath, context: opencodeContext)
+        let codex = CodexAppServerSession(agentID: "agent1", executablePath: codexPath, appBundlePath: nil, context: codexContext)
+        let opencode = OpencodeRunSession(agentID: "agent2", executablePath: opencodePath, appBundlePath: nil, context: opencodeContext)
 
         codex.onEvent = { [weak self] event in self?.onEvent?(event) }
         opencode.onEvent = { [weak self] event in self?.onEvent?(event) }
@@ -67,9 +87,8 @@ final class AgentBridge: @unchecked Sendable {
     }
 
     func startAll() {
-        codex?.start()
-        opencode?.start()
-        genericSessions.values.forEach { $0.start() }
+        // Agent processes are launched lazily on first send so FloatScope can idle
+        // without pulling Codex/OpenCode apps into the foreground.
     }
 
     func send(
@@ -108,14 +127,15 @@ final class AgentBridge: @unchecked Sendable {
     }
 
     func startNewConversation(group: Bool = false) {
-        ConversationContext.resetActiveTitle(prefix: group ? "群聊 " : nil)
+        ConversationContext.resetActiveTitle(prefix: titlePrefix(group: group))
         codex?.resetConversation()
         opencode?.resetConversation()
         genericSessions.values.forEach { $0.resetConversation() }
     }
 
     func prepareGroupConversationIfNeeded() {
-        guard ConversationContext.activeTitle?.hasPrefix("群聊 ") != true else { return }
+        let prefix = titlePrefix(group: true) ?? "群聊 "
+        guard ConversationContext.activeTitle?.hasPrefix(prefix) != true else { return }
         startNewConversation(group: true)
     }
 
@@ -124,6 +144,18 @@ final class AgentBridge: @unchecked Sendable {
         codex?.selectConversation(threadID: entry.codexThreadID, title: entry.title)
         opencode?.selectConversation(sessionID: entry.opencodeSessionID, title: entry.title)
         genericSessions.values.forEach { $0.resetConversation() }
+    }
+
+    private func titlePrefix(group: Bool) -> String? {
+        var parts: [String] = []
+        if group {
+            parts.append("群聊")
+        }
+        if codexUsesCLI {
+            parts.append("CLI")
+        }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " ") + " "
     }
 }
 
@@ -219,11 +251,30 @@ private enum CodexWorkspaceResolver {
     }
 }
 
-private final class CodexAppServerSession: @unchecked Sendable {
+private enum AgentApplicationLauncher {
+    static func openIfConfigured(_ rawPath: String?) {
+        guard let rawPath,
+              !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        let path = NSString(string: rawPath).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: path) else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-g", path]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try? process.run()
+    }
+}
+
+private final class CodexAppServerSession: CodexSessionControlling, @unchecked Sendable {
     var onEvent: ((AgentBridgeEvent) -> Void)?
     let agentID: String
 
     private let executablePath: String
+    private let appBundlePath: String?
     private let context: ConversationContext
     private var process: Process?
     private var inputPipe: Pipe?
@@ -239,9 +290,10 @@ private final class CodexAppServerSession: @unchecked Sendable {
     private var awaitingFirstTurnOutput = false
     private let queue = DispatchQueue(label: "FloatScope.CodexAppServerSession")
 
-    init(agentID: String, executablePath: String, context: ConversationContext) {
+    init(agentID: String, executablePath: String, appBundlePath: String?, context: ConversationContext) {
         self.agentID = agentID
         self.executablePath = executablePath
+        self.appBundlePath = appBundlePath
         self.context = context
         let defaults = UserDefaults.standard
         if defaults.string(forKey: NativeSessionKeys.codexThreadRoot) == context.rootPath {
@@ -346,6 +398,7 @@ private final class CodexAppServerSession: @unchecked Sendable {
 
     private func startLocked() {
         guard process == nil else { return }
+        AgentApplicationLauncher.openIfConfigured(appBundlePath)
         guard FileManager.default.isExecutableFile(atPath: executablePath) else {
             onEvent?(.failed(agentID, "Executable not found: \(executablePath)"))
             return
@@ -375,12 +428,16 @@ private final class CodexAppServerSession: @unchecked Sendable {
         process.terminationHandler = { [weak self] terminated in
             guard let session = self else { return }
             session.queue.async {
-                if !session.isStopping && terminated.terminationStatus != 15 {
-                    session.onEvent?(.failed(session.agentID, "Codex app-server exited with status \(terminated.terminationStatus)"))
+                let message = "Codex app-server exited with status \(terminated.terminationStatus)"
+                if !session.isStopping {
+                    session.awaitingFirstTurnOutput = false
+                    session.failPendingLocked(message)
+                    session.onEvent?(.failed(session.agentID, message))
                 }
                 session.isStopping = false
                 session.process = nil
                 session.inputPipe = nil
+                session.outputBuffer.removeAll(keepingCapacity: false)
             }
         }
 
@@ -568,6 +625,14 @@ private final class CodexAppServerSession: @unchecked Sendable {
         }
     }
 
+    private func failPendingLocked(_ message: String) {
+        let callbacks = pending.values
+        pending.removeAll()
+        for callback in callbacks {
+            callback(.failure(BridgeError.remote(message)))
+        }
+    }
+
     private func handleOutputLocked(_ data: Data) {
         outputBuffer.append(data)
 
@@ -652,11 +717,328 @@ private final class CodexAppServerSession: @unchecked Sendable {
     }
 }
 
+private final class CodexCLISession: CodexSessionControlling, @unchecked Sendable {
+    var onEvent: ((AgentBridgeEvent) -> Void)?
+    let agentID: String
+
+    private let executablePath: String
+    private let context: ConversationContext
+    private let queue = DispatchQueue(label: "FloatScope.CodexCLISession")
+    private var runningProcess: Process?
+    private var outputBuffer = Data()
+    private var streamedTextDuringRun = false
+    private var failureText = ""
+    private var sessionID: String?
+
+    init(agentID: String, executablePath: String, context: ConversationContext) {
+        self.agentID = agentID
+        self.executablePath = executablePath
+        self.context = context
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: NativeSessionKeys.codexThreadRoot) == context.rootPath {
+            self.sessionID = defaults.string(forKey: NativeSessionKeys.codexThreadId)
+            if let sessionID {
+                CodexHistoryVisibilityRegistrar.register(threadID: sessionID, workspaceRoot: context.rootPath)
+                CodexHistoryVisibilityRegistrar.registerSoon(threadID: sessionID, workspaceRoot: context.rootPath)
+            }
+        } else {
+            defaults.removeObject(forKey: NativeSessionKeys.codexThreadId)
+            defaults.removeObject(forKey: NativeSessionKeys.codexThreadRoot)
+            defaults.removeObject(forKey: NativeSessionKeys.codexThreadTitle)
+        }
+    }
+
+    func start() {
+        guard FileManager.default.isExecutableFile(atPath: executablePath) else {
+            onEvent?(.failed(agentID, "Executable not found: \(executablePath)"))
+            return
+        }
+        onEvent?(.started(agentID))
+    }
+
+    func send(message: String, attachments: [URL], modelPreset: CodexModelPreset, effortPreset: ReasoningEffortPreset) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.runningProcess == nil else {
+                self.onEvent?(.failed(self.agentID, "Codex is still responding."))
+                return
+            }
+            self.runLocked(message: message, attachments: attachments, modelPreset: modelPreset, effortPreset: effortPreset)
+        }
+    }
+
+    func stop() {
+        queue.async { [weak self] in
+            self?.runningProcess?.terminate()
+            self?.runningProcess = nil
+        }
+    }
+
+    func resetConversation() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.sessionID = nil
+            UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadId)
+            UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadRoot)
+            UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadTitle)
+        }
+    }
+
+    func rollbackLastTurns(_ count: Int) {
+        guard count > 0 else { return }
+        onEvent?(.failed(agentID, "Rollback is only available in Codex App mode for now."))
+    }
+
+    func selectConversation(threadID: String?, title: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.sessionID = threadID
+            if let threadID {
+                UserDefaults.standard.set(threadID, forKey: NativeSessionKeys.codexThreadId)
+                UserDefaults.standard.set(self.context.rootPath, forKey: NativeSessionKeys.codexThreadRoot)
+                UserDefaults.standard.set(title, forKey: NativeSessionKeys.codexThreadTitle)
+                CodexHistoryVisibilityRegistrar.register(threadID: threadID, workspaceRoot: self.context.rootPath)
+                CodexHistoryVisibilityRegistrar.registerSoon(threadID: threadID, workspaceRoot: self.context.rootPath)
+            } else {
+                UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadId)
+                UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadRoot)
+                UserDefaults.standard.removeObject(forKey: NativeSessionKeys.codexThreadTitle)
+            }
+        }
+    }
+
+    private func runLocked(message: String, attachments: [URL], modelPreset: CodexModelPreset, effortPreset: ReasoningEffortPreset) {
+        guard FileManager.default.isExecutableFile(atPath: executablePath) else {
+            onEvent?(.failed(agentID, "Executable not found: \(executablePath)"))
+            return
+        }
+
+        do {
+            try context.ensureRoot()
+        } catch {
+            onEvent?(.failed(agentID, error.localizedDescription))
+            return
+        }
+
+        CodexHistoryVisibilityRegistrar.registerWorkspace(workspaceRoot: context.rootPath)
+        if let sessionID {
+            CodexHistoryVisibilityRegistrar.register(threadID: sessionID, workspaceRoot: context.rootPath)
+        }
+
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.currentDirectoryURL = URL(fileURLWithPath: context.rootPath)
+        process.arguments = buildArguments(message: message, attachments: attachments, modelPreset: modelPreset, effortPreset: effortPreset)
+        process.standardOutput = output
+        process.standardError = output
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "NO_COLOR": "1"
+        ]) { _, new in new }
+
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            guard let session = self else { return }
+            session.queue.async {
+                session.outputBuffer.append(data)
+                while let newline = session.outputBuffer.firstIndex(of: 10) {
+                    let lineData = session.outputBuffer[..<newline]
+                    session.outputBuffer.removeSubrange(...newline)
+                    session.handleCodexLineLocked(Data(lineData))
+                }
+            }
+        }
+
+        process.terminationHandler = { [weak self] terminated in
+            guard let session = self else { return }
+            session.queue.async {
+                session.runningProcess = nil
+                if !session.outputBuffer.isEmpty {
+                    session.handleCodexLineLocked(session.outputBuffer)
+                    session.outputBuffer.removeAll()
+                }
+                if terminated.terminationStatus == 0 {
+                    if let sessionID = session.sessionID {
+                        CodexHistoryVisibilityRegistrar.register(threadID: sessionID, workspaceRoot: session.context.rootPath)
+                        CodexHistoryVisibilityRegistrar.registerSoon(threadID: sessionID, workspaceRoot: session.context.rootPath)
+                        CodexHistoryVisibilityRegistrar.renameSoon(threadID: sessionID, title: session.cliTitle())
+                    }
+                    session.onEvent?(.completed(session.agentID))
+                } else {
+                    let details = session.failureText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    session.onEvent?(.failed(session.agentID, details.isEmpty ? "codex exec exited with status \(terminated.terminationStatus)" : details))
+                }
+            }
+        }
+
+        do {
+            outputBuffer.removeAll()
+            failureText.removeAll()
+            streamedTextDuringRun = false
+            runningProcess = process
+            try process.run()
+        } catch {
+            runningProcess = nil
+            onEvent?(.failed(agentID, error.localizedDescription))
+        }
+    }
+
+    private func buildArguments(message: String, attachments: [URL], modelPreset: CodexModelPreset, effortPreset: ReasoningEffortPreset) -> [String] {
+        var arguments: [String]
+        if let sessionID {
+            arguments = ["exec", "resume", "--json", "--skip-git-repo-check"]
+            arguments.append(contentsOf: ["-m", modelPreset.codexModel])
+            arguments.append(contentsOf: ["-c", "model_reasoning_effort=\"\(effortPreset.rawValue)\""])
+            for attachment in attachments where Self.isImageAttachment(attachment) {
+                arguments.append(contentsOf: ["-i", attachment.path])
+            }
+            arguments.append(sessionID)
+            arguments.append(promptWithFileNotes(message: message, attachments: attachments))
+        } else {
+            arguments = ["exec", "--json", "--skip-git-repo-check", "-C", context.rootPath]
+            arguments.append(contentsOf: ["-m", modelPreset.codexModel])
+            arguments.append(contentsOf: ["-c", "model_reasoning_effort=\"\(effortPreset.rawValue)\""])
+            for attachment in attachments where Self.isImageAttachment(attachment) {
+                arguments.append(contentsOf: ["-i", attachment.path])
+            }
+            arguments.append(promptWithFileNotes(message: message, attachments: attachments))
+        }
+        return arguments
+    }
+
+    private func promptWithFileNotes(message: String, attachments: [URL]) -> String {
+        let files = attachments.filter { !Self.isImageAttachment($0) }
+        guard !files.isEmpty else { return message }
+        let notes = files.map { "[Attachment: \($0.path)]" }.joined(separator: "\n")
+        return "\(message)\n\n\(notes)"
+    }
+
+    private func handleCodexLineLocked(_ data: Data) {
+        guard !data.isEmpty else { return }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            captureSessionID(from: object)
+            if let text = extractDeltaText(from: object), !text.isEmpty {
+                streamedTextDuringRun = true
+                onEvent?(.streamDelta(agentID, text))
+                return
+            }
+            if !streamedTextDuringRun,
+               let text = extractFinalAssistantText(from: object),
+               !text.isEmpty {
+                streamedTextDuringRun = true
+                onEvent?(.streamDelta(agentID, text))
+            }
+            return
+        }
+
+        if let text = String(data: data, encoding: .utf8),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            failureText += text + "\n"
+        }
+    }
+
+    private func extractDeltaText(from object: [String: Any]) -> String? {
+        let type = object["type"] as? String ?? ""
+        if type.localizedCaseInsensitiveContains("delta") {
+            return object["delta"] as? String
+                ?? object["text"] as? String
+                ?? object["content"] as? String
+        }
+        return nil
+    }
+
+    private func extractFinalAssistantText(from object: [String: Any]) -> String? {
+        guard object["type"] as? String == "response_item",
+              let payload = object["payload"] as? [String: Any],
+              payload["type"] as? String == "message",
+              payload["role"] as? String == "assistant",
+              let content = payload["content"] as? [[String: Any]] else {
+            return nil
+        }
+        return content.compactMap { item -> String? in
+            let type = item["type"] as? String
+            guard type == "output_text" || type == "text" else { return nil }
+            return item["text"] as? String
+        }.joined()
+    }
+
+    private func captureSessionID(from object: Any) {
+        guard sessionID == nil else { return }
+        if let id = findCodexSessionID(in: object) {
+            sessionID = id
+            let title = cliTitle()
+            UserDefaults.standard.set(id, forKey: NativeSessionKeys.codexThreadId)
+            UserDefaults.standard.set(context.rootPath, forKey: NativeSessionKeys.codexThreadRoot)
+            UserDefaults.standard.set(title, forKey: NativeSessionKeys.codexThreadTitle)
+            CodexHistoryVisibilityRegistrar.register(threadID: id, workspaceRoot: context.rootPath)
+            CodexHistoryVisibilityRegistrar.registerSoon(threadID: id, workspaceRoot: context.rootPath)
+            CodexHistoryVisibilityRegistrar.renameSoon(threadID: id, title: title)
+        }
+    }
+
+    private func cliTitle() -> String {
+        let title = context.title
+        let updated: String
+        if title.hasPrefix("群聊 CLI ") || title.hasPrefix("CLI ") {
+            updated = title
+        } else if title.hasPrefix("群聊 ") {
+            updated = "群聊 CLI " + String(title.dropFirst("群聊 ".count))
+        } else {
+            updated = "CLI " + title
+        }
+        ConversationContext.setActiveTitle(updated)
+        return updated
+    }
+
+    private func findCodexSessionID(in value: Any) -> String? {
+        guard let dictionary = value as? [String: Any] else { return nil }
+        if dictionary["type"] as? String == "session_meta",
+           let payload = dictionary["payload"] as? [String: Any],
+           let id = payload["id"] as? String,
+           isUUIDLike(id) {
+            return id
+        }
+        if let payload = dictionary["payload"] as? [String: Any],
+           let id = findCodexSessionID(in: payload) {
+            return id
+        }
+        if let id = dictionary["id"] as? String,
+           let type = dictionary["type"] as? String,
+           type.localizedCaseInsensitiveContains("session"),
+           isUUIDLike(id) {
+            return id
+        }
+        for key in ["session_id", "sessionId", "sessionID", "thread_id", "threadId", "threadID"] {
+            if let id = dictionary[key] as? String, isUUIDLike(id) {
+                return id
+            }
+        }
+        for nested in dictionary.values {
+            if let nestedDictionary = nested as? [String: Any],
+               let id = findCodexSessionID(in: nestedDictionary) {
+                return id
+            }
+        }
+        return nil
+    }
+
+    private func isUUIDLike(_ value: String) -> Bool {
+        value.range(of: #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#, options: .regularExpression) != nil
+    }
+
+    private static func isImageAttachment(_ url: URL) -> Bool {
+        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "heic", "webp", "gif", "tiff", "bmp"]
+        return imageExtensions.contains(url.pathExtension.lowercased())
+    }
+}
+
 private final class OpencodeRunSession: @unchecked Sendable {
     var onEvent: ((AgentBridgeEvent) -> Void)?
     let agentID: String
 
     private let executablePath: String
+    private let appBundlePath: String?
     private let context: ConversationContext
     private let queue = DispatchQueue(label: "FloatScope.OpencodeRunSession")
     private var runningProcess: Process?
@@ -666,9 +1048,10 @@ private final class OpencodeRunSession: @unchecked Sendable {
     private var streamedTextDuringRun = false
     private var sessionNotFoundDuringRun = false
 
-    init(agentID: String, executablePath: String, context: ConversationContext) {
+    init(agentID: String, executablePath: String, appBundlePath: String?, context: ConversationContext) {
         self.agentID = agentID
         self.executablePath = executablePath
+        self.appBundlePath = appBundlePath
         self.context = context
         let defaults = UserDefaults.standard
         if defaults.string(forKey: NativeSessionKeys.opencodeSessionRoot) == context.rootPath {
@@ -990,6 +1373,7 @@ private final class GenericCLISession: @unchecked Sendable {
     }
 
     func start() {
+        AgentApplicationLauncher.openIfConfigured(config.appBundlePath)
         guard !config.executablePath.isEmpty else {
             onEvent?(.failed(config.id, "Executable path is empty."))
             return
@@ -1022,6 +1406,7 @@ private final class GenericCLISession: @unchecked Sendable {
     func resetConversation() {}
 
     private func runLocked(message: String, attachments: [URL]) {
+        AgentApplicationLauncher.openIfConfigured(config.appBundlePath)
         guard FileManager.default.isExecutableFile(atPath: config.executablePath) else {
             onEvent?(.failed(config.id, "Executable not found: \(config.executablePath)"))
             return
@@ -1276,6 +1661,15 @@ private enum CodexHistoryVisibilityRegistrar {
         }
     }
 
+    static func renameSoon(threadID: String, title: String) {
+        rename(threadID: threadID, title: title)
+        for delay in [0.35, 1.25, 3.0, 8.0, 20.0] {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+                rename(threadID: threadID, title: title)
+            }
+        }
+    }
+
     private static func remember(threadID: String, workspaceRoot: String) {
         maintenance.remember(threadID: threadID, workspaceRoot: workspaceRoot) { threads in
             updateState { root in
@@ -1317,6 +1711,57 @@ private enum CodexHistoryVisibilityRegistrar {
             try updated.write(to: stateURL, options: [.atomic])
         } catch {
             // History visibility is best-effort; message delivery must not fail because the UI index is locked.
+        }
+    }
+
+    private static func rename(threadID: String, title: String) {
+        let indexURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex")
+            .appendingPathComponent("session_index.jsonl")
+
+        do {
+            let raw = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+            var didUpdate = false
+            let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).compactMap { rawLine -> String? in
+                guard !rawLine.isEmpty,
+                      let data = rawLine.data(using: .utf8),
+                      var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      object["id"] as? String == threadID else {
+                    return rawLine.isEmpty ? nil : String(rawLine)
+                }
+                object["thread_name"] = title
+                didUpdate = true
+                guard let updated = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+                      let line = String(data: updated, encoding: .utf8) else {
+                    return String(rawLine)
+                }
+                return line
+            }
+
+            var output = lines.joined(separator: "\n")
+            if !didUpdate {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                let object: [String: Any] = [
+                    "id": threadID,
+                    "thread_name": title,
+                    "updated_at": formatter.string(from: Date())
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+                   let line = String(data: data, encoding: .utf8) {
+                    if !output.isEmpty {
+                        output += "\n"
+                    }
+                    output += line
+                }
+            }
+            if !output.hasSuffix("\n") {
+                output += "\n"
+            }
+            try FileManager.default.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try output.write(to: indexURL, atomically: true, encoding: .utf8)
+        } catch {
+            // Best-effort only; Codex can still answer even if the sidebar index is locked.
         }
     }
 

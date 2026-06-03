@@ -93,16 +93,16 @@ enum ConversationHistoryStore {
                 return nil
             }
             let title = index[meta.id]?.title ?? timestampTitle(from: meta.timestamp) ?? meta.id
-            let messages = codexMessages(from: url, agentID: agentID)
-            let updatedAt = messages.last?.createdAt ?? index[meta.id]?.updatedAt ?? meta.timestamp
+            let summary = codexSummary(from: url, agentID: agentID)
+            let updatedAt = summary.updatedAt ?? index[meta.id]?.updatedAt ?? meta.timestamp
             return ConversationHistoryEntry(
                 id: "codex:\(meta.id)",
                 title: title,
                 codexThreadID: meta.id,
                 opencodeSessionID: nil,
                 updatedAt: updatedAt,
-                messageCount: messages.count,
-                preview: messages.last.map { previewText(for: $0) } ?? ""
+                messageCount: summary.messageCount,
+                preview: summary.preview
             )
         }
     }
@@ -161,7 +161,7 @@ enum ConversationHistoryStore {
     }
 
     private static func codexMessages(from url: URL, agentID: String) -> [ChatMessage] {
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        guard let raw = readTailString(from: url, maxBytes: 1_500_000) else { return [] }
         return raw.split(separator: "\n").compactMap { line -> ChatMessage? in
             guard let data = line.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -186,6 +186,15 @@ enum ConversationHistoryStore {
             }
             return nil
         }
+    }
+
+    private static func codexSummary(from url: URL, agentID: String) -> (messageCount: Int, preview: String, updatedAt: Date?) {
+        let messages = codexMessages(from: url, agentID: agentID)
+        return (
+            messageCount: messages.count,
+            preview: messages.last.map { previewText(for: $0) } ?? "",
+            updatedAt: messages.last?.createdAt
+        )
     }
 
     private static func opencodeMessages(sessionID: String, agentID: String) -> [ChatMessage] {
@@ -580,10 +589,7 @@ enum ConversationHistoryStore {
               let data = Data(base64Encoded: payload) else {
             return nil
         }
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Application Support")
-            .appendingPathComponent("FloatScope")
+        let directory = RuntimePaths.applicationSupportDirectory
             .appendingPathComponent("HistoryAttachments", isDirectory: true)
         let ext = URL(fileURLWithPath: filename).pathExtension.isEmpty ? extensionForMimeType(mimeType ?? metadata) : URL(fileURLWithPath: filename).pathExtension
         let output = directory.appendingPathComponent("\(UUID().uuidString).\(ext)")
@@ -602,6 +608,25 @@ enum ConversationHistoryStore {
         if mimeType.contains("gif") { return "gif" }
         if mimeType.contains("webp") { return "webp" }
         return "dat"
+    }
+
+    private static func readTailString(from url: URL, maxBytes: UInt64) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        do {
+            let size = try handle.seekToEnd()
+            let offset = size > maxBytes ? size - maxBytes : 0
+            try handle.seek(toOffset: offset)
+            let data = try handle.readToEnd() ?? Data()
+            var text = String(data: data, encoding: .utf8) ?? ""
+            if offset > 0, let firstNewline = text.firstIndex(of: "\n") {
+                text.removeSubrange(text.startIndex...firstNewline)
+            }
+            return text
+        } catch {
+            return nil
+        }
     }
 
     private static func mimeType(for url: URL) -> String? {
@@ -624,7 +649,7 @@ enum ConversationHistoryStore {
                let previous = result.last,
                case .user = previous.role,
                normalizedUserText(previous.text) == normalizedUserText(message.text),
-               abs(previous.createdAt.timeIntervalSince(message.createdAt)) < 10 {
+               attachmentFingerprint(previous.attachments) == attachmentFingerprint(message.attachments) {
                 continue
             }
             result.append(message)
@@ -636,6 +661,16 @@ enum ConversationHistoryStore {
         visibleUserText(from: text)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func attachmentFingerprint(_ attachments: [ChatAttachment]) -> String {
+        attachments
+            .map { attachment in
+                let stablePath = URL(fileURLWithPath: attachment.path).standardizedFileURL.path
+                return "\(stablePath)|\(attachment.filename)|\(attachment.mimeType ?? "")"
+            }
+            .sorted()
+            .joined(separator: "\n")
     }
 
     private static func timestampTitle(from date: Date) -> String? {
